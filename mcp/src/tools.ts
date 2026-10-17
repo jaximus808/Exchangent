@@ -36,17 +36,17 @@ const seg = (value: string) => encodeURIComponent(value);
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 const mutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 
-export function registerTools(server: MCPServer): void {
+export function registerTools(server: MCPServer) {
   // -------------------------------------------------------------------------
   // Buyer tools
   // -------------------------------------------------------------------------
 
-  server.tool(
+  const create_buy_order=server.tool(
     {
       name: "create_buy_order",
       title: "Create buy order",
       description:
-        "Buyer: post what you want to buy (e.g. a desk and a chair delivered in San Francisco). The backend matches sellers and opens one negotiation session per seller; seller agents are notified automatically. This does NOT purchase or charge anything. budget_cents is the buyer's private all-in ceiling and is never shown to sellers.",
+        "Buyer: post what you want to buy (e.g. a desk and a chair delivered in San Francisco). The backend matches sellers and opens one negotiation session per seller; notification events are queued for the agent dispatcher. This opens an interactive buyer panel. This does NOT purchase or charge anything. budget_cents is the buyer's private all-in ceiling and is never shown to sellers.",
       inputSchema: z.object({
         title: z.string().min(1).describe("Short human-readable title, e.g. \"Standing desk + ergonomic chair\"."),
         requirements: z
@@ -74,6 +74,7 @@ export function registerTools(server: MCPServer): void {
         idempotency_key: idempotencyKey,
       }),
       outputSchema: resultSchema,
+      view: { name: "buyer-order", description: "Exchangent buyer order panel", prefersBorder: true },
       annotations: mutation,
     },
     async (input, ctx) => {
@@ -88,14 +89,15 @@ export function registerTools(server: MCPServer): void {
     },
   );
 
-  server.tool(
+  const get_buy_order=server.tool(
     {
       name: "get_buy_order",
       title: "Get buy order",
       description:
-        "Buyer: read one of your buy orders — its status and requirements, your own private budget/target, and every seller session (status, turn, version, rounds, current seller offer and your latest counter). Use the session `version` as expected_version for counter_offer.",
+        "Buyer: open an interactive request and offer-comparison panel for one of your buy orders — its status and requirements, your own private budget/target, and every seller session (status, turn, version, rounds, current seller offer and your latest counter). Use the session `version` as expected_version for counter_offer.",
       inputSchema: z.object({ request_id: id("buy order (request)") }),
       outputSchema: resultSchema,
+      view: { name: "buyer-status", description: "Exchangent buyer order panel", prefersBorder: true },
       annotations: readOnly,
     },
     async ({ request_id }, ctx) =>
@@ -104,14 +106,15 @@ export function registerTools(server: MCPServer): void {
       ),
   );
 
-  server.tool(
+  const list_offers=server.tool(
     {
       name: "list_offers",
       title: "List offers",
       description:
-        "Buyer: list the current seller offers for one of your buy orders, sorted by all-in total (cheapest first). Each offer includes its offer_id, session_id, line items and totals.",
+        "Buyer: display an interactive comparison of current seller offers for one of your buy orders, sorted by all-in total (cheapest first). Each offer includes its offer_id, session_id, line items and totals.",
       inputSchema: z.object({ request_id: id("buy order (request)") }),
       outputSchema: resultSchema,
+      view: { name: "buyer-offers", description: "Exchangent buyer offers panel", prefersBorder: true },
       annotations: readOnly,
     },
     async ({ request_id }, ctx) =>
@@ -122,7 +125,7 @@ export function registerTools(server: MCPServer): void {
       ),
   );
 
-  server.tool(
+  const counter_offer=server.tool(
     {
       name: "counter_offer",
       title: "Counter a seller offer",
@@ -150,7 +153,7 @@ export function registerTools(server: MCPServer): void {
     },
   );
 
-  server.tool(
+  const decline_seller=server.tool(
     {
       name: "decline_seller",
       title: "Decline a seller",
@@ -176,7 +179,7 @@ export function registerTools(server: MCPServer): void {
     },
   );
 
-  server.tool(
+  const reserve_offer=server.tool(
     {
       name: "reserve_offer",
       title: "Reserve an offer",
@@ -199,17 +202,18 @@ export function registerTools(server: MCPServer): void {
       ),
   );
 
-  server.tool(
+  const get_checkout_link=server.tool(
     {
       name: "get_checkout_link",
       title: "Get checkout link",
       description:
-        "Buyer: create (or return the existing) Stripe test Checkout link for a reservation. The price comes from the saved offer; you cannot change it. Only the human can approve payment, by opening the link.",
+        "Buyer: open a checkout-approval panel and create (or return the existing) Stripe test Checkout link for a reservation. The price comes from the saved offer; you cannot change it. Only the human can approve payment, by opening the link.",
       inputSchema: z.object({
         reservation_id: id("reservation"),
         idempotency_key: idempotencyKey,
       }),
       outputSchema: resultSchema,
+      view: { name: "checkout", description: "Exchangent checkout panel", prefersBorder: true },
       annotations: mutation,
     },
     async ({ reservation_id, idempotency_key }, ctx) =>
@@ -223,14 +227,15 @@ export function registerTools(server: MCPServer): void {
       ),
   );
 
-  server.tool(
+  const get_reservation_status=server.tool(
     {
       name: "get_reservation_status",
       title: "Get reservation status",
       description:
-        "Buyer: check a reservation and its order. Payment is confirmed only by the backend's verified Stripe webhook, so use this (not the checkout redirect) to know whether the order is paid.",
+        "Buyer: open an interactive reservation and order-status panel. Payment is confirmed only by the backend's verified Stripe webhook, so use this (not the checkout redirect) to know whether the order is paid.",
       inputSchema: z.object({ reservation_id: id("reservation") }),
       outputSchema: resultSchema,
+      view: { name: "order-status", description: "Exchangent checkout panel", prefersBorder: true },
       annotations: readOnly,
     },
     async ({ reservation_id }, ctx) =>
@@ -262,16 +267,17 @@ export function registerTools(server: MCPServer): void {
   // Seller tools
   // -------------------------------------------------------------------------
 
-  server.tool(
+  const list_my_requests=server.tool(
     {
       name: "list_my_requests",
       title: "List my buyer requests",
       description:
-        "Seller: list your negotiation sessions (one per matched buyer request) with the request title, requirements, whose turn it is, the session version and rounds so far.",
+        "Seller: open an interactive business panel listing your negotiation sessions (one per matched buyer request) with the request title, requirements, whose turn it is, the session version and rounds so far.",
       inputSchema: z.object({
         status: z.enum(["open", "declined", "closed"]).optional().describe("Filter by session status (default: open)."),
       }),
       outputSchema: resultSchema,
+      view: { name: "seller-desk", description: "Exchangent seller desk panel", prefersBorder: true },
       annotations: readOnly,
     },
     async ({ status }, ctx) =>
@@ -280,7 +286,7 @@ export function registerTools(server: MCPServer): void {
       ),
   );
 
-  server.tool(
+  const get_negotiation=server.tool(
     {
       name: "get_negotiation",
       title: "Get negotiation",
@@ -288,6 +294,7 @@ export function registerTools(server: MCPServer): void {
         "Read one negotiation session as your role sees it: buyer requirements, the full history of seller offers and buyer counters with notes, whose turn it is and the current version. Always call this before make_offer and use its version as expected_version.",
       inputSchema: z.object({ session_id: id("negotiation session") }),
       outputSchema: resultSchema,
+      view: { name: "negotiation", description: "Exchangent seller desk panel", prefersBorder: true },
       annotations: readOnly,
     },
     async ({ session_id }, ctx) =>
@@ -300,7 +307,7 @@ export function registerTools(server: MCPServer): void {
       }),
   );
 
-  server.tool(
+  const get_inventory=server.tool(
     {
       name: "get_inventory",
       title: "Get my inventory",
@@ -308,6 +315,7 @@ export function registerTools(server: MCPServer): void {
         "Seller: list your own inventory — inventory_id, title, category, attributes, list_cents (list price), floor_cents (your private minimum, never shown to buyers) and available quantity.",
       inputSchema: z.object({}),
       outputSchema: resultSchema,
+      view: { name: "inventory", description: "Exchangent seller desk panel", prefersBorder: true },
       annotations: readOnly,
     },
     async (_input, ctx) =>
@@ -316,7 +324,7 @@ export function registerTools(server: MCPServer): void {
       ),
   );
 
-  server.tool(
+  const make_offer=server.tool(
     {
       name: "make_offer",
       title: "Make an offer",
@@ -354,7 +362,7 @@ export function registerTools(server: MCPServer): void {
     },
   );
 
-  server.tool(
+  const decline_request=server.tool(
     {
       name: "decline_request",
       title: "Decline a buyer request",
@@ -379,4 +387,5 @@ export function registerTools(server: MCPServer): void {
       );
     },
   );
+  return {create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request};
 }

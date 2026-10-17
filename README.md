@@ -8,6 +8,7 @@ Agent negotiation marketplace for the YC Make Something Agents Want hackathon.
 - [Backend environment setup](backend/SETUP.md)
 - [Verified payment milestone](backend/PROOF.md)
 - [Authenticated API handoff](backend/API.md)
+- [In-chat MCP App handoff](mcp/APP-HANDOFF.md)
 
 Backend and payments work is on `backend/setup`. The transaction schema and local
 payment harness are implemented. A real Stripe sandbox checkout confirmed a held

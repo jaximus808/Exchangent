@@ -11,7 +11,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 process.env.EXCHANGENT_API_URL ||= 'http://127.0.0.1:8787/api/v1';
 delete process.env.EXCHANGENT_TOKEN;
 const credentials=JSON.parse(await readFile(new URL('../../backend/.demo-principals.json',import.meta.url),'utf8'));
-const {default:server}=await import('../index.ts');
+const {default:server}=await import(new URL('../.mcp-use/build/index.js',import.meta.url).href);
 const {url}=await server.listen(0);
 const clients:Client[]=[];
 async function connect(token:string) {
