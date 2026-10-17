@@ -124,6 +124,31 @@ What this guarantees:
 - **Out-of-date replies are caught.** If both sides counter at the same moment, the later reply to an old offer is rejected and told to read the latest one.
 - **Private numbers stay private.** Floors and budgets are checked in code. The buyer agent's prompt gets a target price, not the real budget. Notes that contain the budget or floor numbers are blocked.
 
+### How the message gets sent (the outbox sender)
+The model decides what to offer, and our code sends the message through Inkbox. The message goes out from the agent's own Inkbox identity, using that agent's own key:
+
+```ts
+// runs in the worker; retried until it succeeds
+async function deliver(offerId) {
+  const offer = await db.offers.get(offerId);
+  const s = await db.sessions.get(offer.session_id);
+  const a2a = await identities[offer.from_agent].a2aClient();      // the sending agent's Inkbox identity
+  const target = await a2a.fetchCard(`https://inkbox.ai/a2a/${s.counterparty_handle}/card`); // cache this
+
+  await a2a.send(target, {
+    contextId: s.inkbox_context_id,          // omit on the first message; save the one Inkbox returns
+    messageId: offer.id,                     // idempotency: a retry can't send twice
+    parts: [
+      { data: { type: "offer", offer_id: offer.id, version: offer.version, price: offer.price, items: offer.items } },
+      { text: offer.note },                  // the agent's written note
+    ],
+  });
+  await db.offers.update(offerId, { delivered_at: new Date() });
+}
+```
+
+The full path: the model calls `make_offer` → our code checks the offer and saves it → our code calls Inkbox `a2a.send` as that agent → Inkbox fires a webhook to the other agent → the other agent reads the offer from the database. Both agents belong to our Inkbox organization, so no contact rules are needed between them.
+
 ### How an agent receives a message mid-session
 A model is never interrupted mid-generation. The worker receives the message and gives it to the model as its next turn.
 

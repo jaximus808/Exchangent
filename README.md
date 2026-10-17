@@ -2,7 +2,8 @@
 
 Agent negotiation marketplace for the YC Make Something Agents Want hackathon.
 
-- [Shared architecture](docs)
+- [Shared architecture](doc/architecture.md)
+- [Negotiation integration contract](doc/negotiation-contract.md)
 - [Backend integration contract](backend/CONTRACT.md)
 - [Backend environment setup](backend/SETUP.md)
 - [Verified payment milestone](backend/PROOF.md)
