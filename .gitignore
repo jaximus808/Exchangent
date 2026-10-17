@@ -9,6 +9,7 @@ coverage/
 .stripe/
 .local/
 .DS_Store
+*.tsbuildinfo
 
 # InsForge & AI agent skills
 .insforge

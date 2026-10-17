@@ -9,7 +9,8 @@
     "start": "node --env-file=.env.local src/server.mjs",
     "test": "node --test test/*.test.mjs",
     "proof": "node --env-file=.env.local scripts/proof.mjs",
-    "test:integration": "node --env-file=.env.local --test test/integration.mjs"
+    "test:integration": "node --env-file=.env.local --test test/integration.mjs",
+    "test:auth-integration": "node --env-file=.env.local --test test/auth-integration.mjs"
   },
   "dependencies": {
     "@insforge/sdk": "1.5.2",

@@ -5,6 +5,8 @@
 - Backend work branch: `backend/setup`.
 - API and schema contract: `backend/CONTRACT.md` (broader target).
 - Transaction foundation implemented in `migrations/` and `backend/src/`.
+- Authenticated requests, scoped agent credentials and status reads are documented
+  in `API.md`. Both database migrations are applied to the test backend.
 - Stripe sandbox account: `acct_1URbMuIve5dAZQ3d`. Test-only CLI credentials exist
   locally. Claim the temporary sandbox before October 24, 2026.
 - A real sandbox Checkout Session was paid with Stripe's test card. The local
@@ -64,16 +66,24 @@ npm run test:integration --prefix backend
 Integration tests require the locally saved public `INSFORGE_ANON_KEY`, a running
 server and a completed proof checkout. They create additional disposable test rows.
 
-The loopback server's buyer principal is configured by `DEMO_BUYER_ID`; its random
-`COMMERCE_DEMO_TOKEN` is required as a Bearer credential. The proof CLI calls the
-same commerce module directly. Do not expose this single-buyer demo API publicly.
+The API now requires a verified InsForge user access token or an explicit scoped
+delegation. `COMMERCE_DEMO_TOKEN` no longer grants HTTP access. `DEMO_BUYER_ID` is
+only an administrative proof fixture; the proof CLI calls the commerce module
+directly. Keep the server local pending frontend sign-in and deployment review.
+
+With the authenticated server running, run
+`npm run test:auth-integration --prefix backend`. These tests bootstrap disposable
+delegations administratively, exercise the actual API, and revoke them afterward.
+They do not claim to test a complete human OAuth/email verification flow.
 
 ## Remaining integration work
 
-- Port the handlers to the agreed Next.js layout and replace demo authentication
-  with verified user and worker principals before public deployment.
-- Wire request creation, matching, seller offer creation and negotiation sessions;
-  this milestone starts with a fixed seller-authorized offer.
+- Port the handlers to the agreed Next.js layout and connect the frontend's
+  verified InsForge sign-in sessions. Complete a real human-login acceptance test.
+- Wire matching, seller onboarding/offer creation and negotiation sessions;
+  request creation currently queues a durable `request.created` outbox event.
+- Agree MCP OAuth mapping with the teammate. A provider's token is not automatically
+  an InsForge user token; exchange through an authenticated account-link flow.
 - Add scheduled reconciliation: unpaid bound sessions release stock only after
   Stripe confirms expiry/failure. Never release based solely on a local timestamp.
   Unbound holds also need a safe cleanup path; ambiguous checkout creation retries

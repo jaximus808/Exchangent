@@ -1,0 +1,6 @@
+{
+ "name":"@exchangent/web","version":"0.1.0","private":true,
+ "scripts":{"dev":"next dev --hostname 127.0.0.1","build":"next build","start":"next start --hostname 127.0.0.1","typecheck":"tsc --noEmit"},
+ "dependencies":{"next":"latest","react":"latest","react-dom":"latest","@insforge/sdk":"1.5.2","motion":"latest","lucide-react":"latest","@radix-ui/react-dialog":"latest"},
+ "devDependencies":{"typescript":"latest","@types/react":"latest","@types/react-dom":"latest","@types/node":"latest"}
+}

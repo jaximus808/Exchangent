@@ -85,7 +85,7 @@ export class Commerce {
 }
 export function fromEnv(env=process.env) {
   assertTestKey(env.STRIPE_SECRET_KEY);
-  for(const key of ['INSFORGE_URL','INSFORGE_API_KEY','STRIPE_WEBHOOK_SECRET','COMMERCE_DEMO_TOKEN','DEMO_BUYER_ID','STRIPE_INTEGRATION_ID'])
+  for(const key of ['INSFORGE_URL','INSFORGE_API_KEY','STRIPE_WEBHOOK_SECRET','STRIPE_INTEGRATION_ID'])
     if(!env[key]) throw new CommerceError(`missing_${key}`,500);
   const baseUrl=env.COMMERCE_BASE_URL??'http://127.0.0.1:8787';
   const url=new URL(baseUrl);

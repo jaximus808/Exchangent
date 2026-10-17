@@ -1,10 +1,11 @@
 # Backend integration contract
 
-Implementation target for the backend and payments owner. Reservation, checkout
-and reservation-status endpoints now exist in the local test harness; other
-endpoints below are not implemented yet. See `SETUP.md` and `PROOF.md` for the
-implemented scope, authentication limits and verified test results.
-The root `docs` file remains the shared architecture reference.
+Implementation target for the backend and payments owner. Request creation,
+request/offer reads, seller activity, reservations, checkout and delegation
+endpoints exist in the authenticated local API. See `API.md` for exact implemented
+routes; the remaining table entries are future targets. See `SETUP.md` and
+`PROOF.md` for environment and verified payment results. The shared architecture
+reference is `doc/architecture.md`.
 
 ## Ownership
 
