@@ -5,6 +5,8 @@
 - Backend work branch: `backend/setup`.
 - API and schema contract: `backend/CONTRACT.md` (broader target).
 - Transaction foundation implemented in `migrations/` and `backend/src/`.
+- Authenticated requests, scoped agent credentials and status reads are documented
+  in `API.md`. All three migrations, including negotiation, are applied to the test backend.
 - Stripe sandbox account: `acct_1URbMuIve5dAZQ3d`. Test-only CLI credentials exist
   locally. Claim the temporary sandbox before October 24, 2026.
 - A real sandbox Checkout Session was paid with Stripe's test card. The local
@@ -64,20 +66,31 @@ npm run test:integration --prefix backend
 Integration tests require the locally saved public `INSFORGE_ANON_KEY`, a running
 server and a completed proof checkout. They create additional disposable test rows.
 
-The loopback server's buyer principal is configured by `DEMO_BUYER_ID`; its random
-`COMMERCE_DEMO_TOKEN` is required as a Bearer credential. The proof CLI calls the
-same commerce module directly. Do not expose this single-buyer demo API publicly.
+The API now requires a verified InsForge user access token or an explicit scoped
+delegation. `COMMERCE_DEMO_TOKEN` no longer grants HTTP access. `DEMO_BUYER_ID` is
+only an administrative proof fixture; the proof CLI calls the commerce module
+directly. Keep the server local pending frontend sign-in and deployment review.
+
+With the authenticated server running, run
+`npm run test:auth-integration --prefix backend`. These tests bootstrap disposable
+delegations administratively, exercise the actual API, and revoke them afterward.
+They do not claim to test a complete human OAuth/email verification flow.
 
 ## Negotiation loop
 
 Spec: `doc/negotiation-contract.md`. Schema and RPCs: `migrations/20261017230000_negotiation.sql`
-(additive; apply after the checkout foundation). Routes live in `src/http.mjs`, rules and
+(apply after the checkout and authenticated-commerce migrations). Routes live in `src/http.mjs`, rules and
 redaction in `src/negotiation.mjs`. Bearer tokens resolve through `commerce_principals`
-(sha256 only); the legacy `COMMERCE_DEMO_TOKEN` still means `DEMO_BUYER_ID`.
+(sha256 only). Seed tokens expire after 24 hours and support `revoked_at`;
+the retired `COMMERCE_DEMO_TOKEN` is not accepted by the running server.
+The server dispatches 64-character hex demo tokens to these role-based routes;
+verified user sessions and `exg_` task delegations retain the scoped API in `API.md`.
+Negotiation tools currently require the seeded role token, not a user session or
+scoped delegation. Full account-linked MCP authentication remains pending.
 
 ```sh
 npm run seed:negotiation --prefix backend   # writes backend/.demo-principals.json (gitignored)
-npm run test:db --prefix backend            # throwaway Docker postgres:16, both migrations, HTTP loop
+npm run test:db --prefix backend            # throwaway Docker postgres:16, all migrations, production HTTP loop
 ```
 
 The seed reuses `DEMO_BUYER_ID` as the buyer when set, resets demo stock and prices, and
@@ -85,10 +98,13 @@ rotates every seed token on each run. `test:db` never touches InsForge.
 
 ## Remaining integration work
 
-- Port the handlers to the agreed Next.js layout and replace demo authentication
-  with verified user and worker principals before public deployment.
-- Wire request creation, matching, seller offer creation and negotiation sessions;
-  this milestone starts with a fixed seller-authorized offer.
+- Port the handlers to the agreed Next.js layout and connect the frontend's
+  verified InsForge sign-in sessions. Complete a real human-login acceptance test.
+- Connect the frontend request form and user sessions to the structured negotiation
+  contract. The demo role API now creates matched sessions and negotiation events;
+  the frontend text-brief API still queues `request.created` for later processing.
+- Agree MCP OAuth mapping with the teammate. A provider's token is not automatically
+  an InsForge user token; exchange through an authenticated account-link flow.
 - Add scheduled reconciliation: unpaid bound sessions release stock only after
   Stripe confirms expiry/failure. Never release based solely on a local timestamp.
   Unbound holds also need a safe cleanup path; ambiguous checkout creation retries

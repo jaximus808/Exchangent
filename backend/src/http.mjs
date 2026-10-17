@@ -9,7 +9,7 @@ async function body(req) {
 async function json(req) {
  const raw=(await body(req)).toString('utf8');
  if(!raw.trim()) return {};
- try {return JSON.parse(raw);} catch {throw fail('invalid_input','Body must be valid JSON');}
+ try {const input=JSON.parse(raw);if(!input||typeof input!=='object'||Array.isArray(input)) throw new Error();return input;} catch {throw fail('invalid_input','Body must be valid JSON');}
 }
 // [method, pattern, scopes, handler(ctx)]. Scopes are re-checked inside Negotiation methods.
 const routes=[
