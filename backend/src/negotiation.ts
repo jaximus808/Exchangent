@@ -145,14 +145,19 @@ export class Negotiation {
   }
   const match=/^Bearer ([\x21-\x7e]{16,512})$/.exec(header);
   if(!match) throw fail('unauthorized');
-  const p=await this.rpc<RolePrincipal | null>('commerce_resolve_principal',{p_token_hash:hashToken(match[1])});
+  // `exc_` connector access tokens (OAuth) resolve to the same buyer/seller principal shape.
+  const connector=match[1].startsWith('exc_');
+  const p=await this.rpc<RolePrincipal | null>(connector?'commerce_resolve_connector':'commerce_resolve_principal',{p_token_hash:hashToken(match[1])});
   if(!p) throw fail('unauthorized');
   return p;
  }
  need(p: RolePrincipal,...scopes: RoleScope[]) {
   if(!scopes.includes(p.scope)) throw fail('forbidden',`Requires ${scopes.join(' or ')} scope; this token has ${p.scope} scope`);
  }
- whoami(p: RolePrincipal) { return {scope:p.scope,actor_id:p.actor_id,seller_id:p.seller_id??null,label:p.label}; }
+ whoami(p: RolePrincipal) {
+  if(p.kind==='connector') return {kind:'connector' as const,scope:p.scope,actor_id:p.actor_id,seller_id:p.seller_id??null,client_id:p.client_id??null};
+  return {scope:p.scope,actor_id:p.actor_id,seller_id:p.seller_id??null,label:p.label};
+ }
 
  // Buyer
  async createRequest(p: RolePrincipal,idempotencyKey: unknown,body: unknown) {

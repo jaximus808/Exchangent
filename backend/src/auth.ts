@@ -21,7 +21,7 @@ export function authorize(principal: Principal,scope: DelegationScope,{requestId
      (requestId && principal.requestId!==requestId) ||
      (sellerId && principal.sellerId!==sellerId)) throw new CommerceError('forbidden',403);
 }
-export interface VerifiedUser { id: string }
+export interface VerifiedUser { id: string; email?: string | null }
 export interface AuthOptions {
   commerce: Commerce;
   verifyUser: (token: string)=>Promise<VerifiedUser | null | undefined>;
@@ -39,6 +39,9 @@ export class Auth {
   }
   async authenticate(header: string | undefined): Promise<Principal> {
     const token=bearer(header);
+    // Connector tokens belong to the negotiation routes; refresh tokens are never bearer
+    // credentials. Neither is ever sent to InsForge for verification.
+    if(token.startsWith('exc_')||token.startsWith('exr_')) throw new CommerceError('unauthorized',401);
     if(token.startsWith('exg_')) {
       const {data,error}=await this.db.database.from('commerce_delegations')
         .select('id,actor_id,request_id,seller_id,scopes,expires_at,revoked_at').eq('token_hash',hashToken(token)).limit(1);
@@ -52,7 +55,7 @@ export class Auth {
     const user=await this.verifyUser(token);
     if(!user?.id || !UUID.test(user.id)) throw new CommerceError('unauthorized',401);
     const actorId=await this.commerce.rpc<string>('commerce_actor_for_user',{p_user:user.id,p_label:'Exchangent user'});
-    return {kind:'user',actorId,userId:user.id};
+    return {kind:'user',actorId,userId:user.id,...(typeof user.email==='string'&&user.email?{email:user.email}:{})};
   }
   async createDelegation(principal: Principal,input: Record<string, unknown>): Promise<Delegation> {
     requireUser(principal);

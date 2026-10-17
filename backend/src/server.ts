@@ -9,6 +9,7 @@ import { Activity } from './activity.ts';
 import { Negotiation } from './negotiation.ts';
 import { createHandler } from './http.ts';
 import { checkoutReturn } from './checkout-return.ts';
+import { OAuth, tokenEndpoint } from './oauth.ts';
 
 async function body(req: IncomingMessage) {
   const chunks: Buffer[]=[];let bytes=0;
@@ -30,23 +31,37 @@ async function json(req: IncomingMessage,allowEmpty=false): Promise<Record<strin
     throw new CommerceError('invalid_json',400);
   }
 }
-export interface AppOptions { commerce: Commerce; auth: Auth; activity?: Activity; negotiation?: Negotiation }
-export function createApp({commerce,auth,activity=new Activity(commerce),negotiation=new Negotiation({db:commerce.db})}: AppOptions) {
+export interface AppOptions { commerce: Commerce; auth: Auth; activity?: Activity; negotiation?: Negotiation; oauth?: OAuth }
+// Seeded 64-hex demo role tokens and `exc_` connector access tokens use the negotiation routes.
+const ROLE_TOKEN=/^Bearer (?:[a-f0-9]{64}|exc_[A-Za-z0-9_-]{16,512})$/;
+export function createApp({commerce,auth,activity=new Activity(commerce),negotiation=new Negotiation({db:commerce.db}),
+  oauth=new OAuth({db:commerce.db})}: AppOptions) {
   const negotiationHandler=createHandler({commerce,negotiation});
   return createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
     const send=(code: number,data: unknown)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
     try {
-      const path=new URL(req.url as string,'http://127.0.0.1').pathname;
+      const url=new URL(req.url as string,'http://127.0.0.1'),path=url.pathname;
       if(req.method==='GET'&&path==='/health') return send(200,{status:'ok',mode:'test'});
       if(req.method==='GET'&&['/success','/cancel'].includes(path))
         return checkoutReturn(res,path);
       if(req.method==='POST'&&path==='/webhooks/stripe')
         return send(200,{data:await commerce.webhook(await body(req),req.headers['stripe-signature'])});
-      // Seeded role tokens use a separate, expiring demo identity. User sessions and
-      // task delegations always pass through the scoped authentication path below.
-      if(/^Bearer [a-f0-9]{64}$/.test(req.headers.authorization??''))
-        return negotiationHandler(req,res);
+      // OAuth token endpoint: client-authenticated, no Bearer token, RFC 6749 JSON.
+      if(path==='/api/v1/oauth/token') return tokenEndpoint(oauth,req,res);
+      const roleToken=ROLE_TOKEN.test(req.headers.authorization??'');
+      // Consent APIs: a verified InsForge user session only (doc/oauth-contract.md).
+      if(path==='/api/v1/oauth/targets'||path==='/api/v1/oauth/authorize') {
+        if(roleToken) throw new CommerceError('user_session_required',403);
+        const principal=await auth.authenticate(req.headers.authorization);
+        if(req.method==='GET'&&path==='/api/v1/oauth/targets') return send(200,{data:await oauth.targets(principal,url.searchParams)});
+        if(req.method==='POST'&&path==='/api/v1/oauth/authorize') return send(200,{data:await oauth.authorize(principal,await json(req))});
+        throw new CommerceError('not_found',404);
+      }
+      // Seeded role tokens use a separate, expiring demo identity; connector tokens resolve to
+      // the same buyer/seller principals. User sessions and task delegations always pass
+      // through the scoped authentication path below.
+      if(roleToken) return negotiationHandler(req,res);
       const principal=await auth.authenticate(req.headers.authorization);
       if(req.method==='GET'&&path==='/api/v1/me') return send(200,{data:{
         actor_id:principal.actorId,kind:principal.kind,scopes:principal.scopes??null,

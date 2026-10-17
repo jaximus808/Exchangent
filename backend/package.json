@@ -14,6 +14,8 @@
     "test:integration": "node --env-file=.env.local --test test/integration.ts",
     "test:auth-integration": "node --env-file=.env.local --test test/auth-integration.ts",
     "seed:negotiation": "node --env-file-if-exists=.env.local scripts/seed-negotiation.ts",
+    "oauth:client": "node --env-file-if-exists=.env.local scripts/oauth-client.ts",
+    "assign:seller": "node --env-file-if-exists=.env.local scripts/assign-seller.ts",
     "test:db": "sh test/sql/run.sh"
   },
   "dependencies": {

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Throwaway postgres:16 container: apply InsForge stubs + every migration in order,
-# then run the real-database tests. The container is removed on exit.
+# then run the real-database tests one file at a time (they share the database and
+# the demo seed). The container is removed on exit.
 set -eu
 cd "$(dirname "$0")/../.."
 DOCKER=${DOCKER:-docker}
@@ -15,4 +16,4 @@ for f in test/sql/stubs.sql ../migrations/*.sql; do
  echo "apply $f"
  $DOCKER exec -i "$NAME" psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres < "$f"
 done
-DATABASE_URL="postgres://postgres:test@127.0.0.1:$PORT/postgres" node --test test/sql/*.db.ts
+DATABASE_URL="postgres://postgres:test@127.0.0.1:$PORT/postgres" node --test --test-concurrency=1 test/sql/*.db.ts

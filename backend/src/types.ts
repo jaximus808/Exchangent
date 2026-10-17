@@ -6,6 +6,8 @@ export type KnownErrorCode =
  // Auth and access
  | 'unauthorized' | 'forbidden' | 'user_session_required' | 'authentication_unavailable'
  | 'invalid_delegation' | 'invalid_scope' | 'delegation_failed'
+ // Connector OAuth consent API (src/oauth.ts)
+ | 'invalid_client' | 'invalid_redirect_uri' | 'invalid_request'
  // Input
  | 'invalid_id' | 'invalid_input' | 'invalid_json' | 'idempotency_key_required' | 'idempotency_conflict' | 'body_too_large'
  // Lookups
@@ -61,6 +63,8 @@ export type DelegationScope = 'request:read' | 'reservation:write' | 'checkout:w
 /** Verified InsForge user session (src/auth.ts). Optional fields keep `principal.scopes ?? null` uniform. */
 export interface UserPrincipal {
  kind: 'user'; actorId: string; userId: string;
+ /** Email of the verified InsForge user, when InsForge returned one. */
+ email?: string;
  scopes?: undefined; requestId?: undefined; sellerId?: undefined;
 }
 /** Opaque `exg_` task delegation bound to one request or one seller. */
@@ -70,9 +74,15 @@ export interface DelegationPrincipal {
 }
 export type Principal = UserPrincipal | DelegationPrincipal;
 
-/** Seeded 64-hex role token (commerce_resolve_principal) used by the negotiation routes. */
+/**
+ * Negotiation-route principal: a seeded 64-hex role token (commerce_resolve_principal) or an
+ * `exc_` connector access token from the OAuth flow (commerce_resolve_connector, kind 'connector').
+ */
 export type RoleScope = 'buyer' | 'seller' | 'worker';
-export interface RolePrincipal { scope: RoleScope; actor_id: string; seller_id?: string | null; label?: string }
+export interface RolePrincipal {
+ scope: RoleScope; actor_id: string; seller_id?: string | null; label?: string;
+ kind?: 'connector'; client_id?: string;
+}
 
 // ---------- Table rows (subset of columns the backend reads) ----------
 export type RequestStatus = 'negotiating' | 'awaiting_payment' | 'confirmed';
