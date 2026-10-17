@@ -59,7 +59,8 @@ empty), and optionally `code_challenge` with `code_challenge_method=S256`. Other
 role tokens get `403 user_session_required`. The authorize call must:
 - validate the client, an exact-match redirect URI, `kind`, and ownership (`commerce_sellers.owner_id = actor`);
 - store the code as a SHA-256 hash, valid for 5 minutes and single-use, together with the client,
-  redirect URI, actor, kind, seller_id, scope and optional PKCE challenge;
+  redirect URI, actor, kind, seller_id, scope and PKCE challenge. The backend **requires** an S256
+  challenge (see "Backend implementation notes");
 - return `redirect_to`.
 
 `POST /api/v1/oauth/token` follows the OAuth standard, not the `{data}` envelope:
@@ -113,3 +114,24 @@ tokens keep working for the autonomous agent runner.
   Store those as Manufact environment variables, never in git.
 - `npm run assign:seller --prefix backend -- --email <person> --seller "Bay Desk Co"` makes a signed-up
   person the owner of a demo business, so it appears on their consent screen.
+
+## Backend implementation notes
+
+These are where the backend (`backend/src/oauth.ts`, `migrations/20261018000200_connector-oauth.sql`)
+is stricter than or more specific than the sections above.
+
+- **PKCE is mandatory.** `POST /api/v1/oauth/authorize` without a `code_challenge`, or with a
+  method other than `S256`, returns `400 invalid_request`, and the token exchange always needs
+  `code_verifier`. The MCP proxy always sends PKCE, so this changes nothing for it. A connection
+  link without a challenge now fails at Approve with the web page's "incomplete request" message.
+- **Seller targets:** a business the person doesn't own, or one that is disabled or missing,
+  returns `403 forbidden`, never `404`.
+- **Scope:** if the requested `scope` names `buyer` or `seller` but not the chosen kind, authorize
+  returns `400 invalid_scope`. An empty scope or the proxy's `buyer seller` accepts either kind.
+- **Replay:** presenting a used authorization code revokes the tokens it issued
+  (RFC 6749 section 4.1.2). Presenting a rotated refresh token revokes the whole grant. A failed
+  exchange (wrong verifier or wrong `redirect_uri`) does not use up the code.
+- **Client authentication:** sending Basic and body credentials that disagree returns
+  `400 invalid_request`. A revoked client returns `401 invalid_client`.
+- **Seller grants** stop working, for both the access token and refresh, as soon as the actor no
+  longer owns that business.

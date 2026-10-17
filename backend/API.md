@@ -17,6 +17,16 @@ Send `Authorization: Bearer <token>`. Accepted credentials are:
    Only its SHA-256 digest is stored. The plaintext is returned once, must stay in
    a server-side secret store, and must not enter prompts, transcripts or logs.
 
+3. **Connector access token (`exc_`).** Issued by the OAuth token endpoint below to
+   the MCP server after a person approves the consent screen (`doc/oauth-contract.md`).
+   It is bound to one actor and one role: the person's buyer account, or one business
+   they own. It resolves to the same principal as a seeded role token
+   (`{ scope: 'buyer', actor_id }` or `{ scope: 'seller', actor_id, seller_id }`), so it
+   uses the negotiation routes in `doc/negotiation-contract.md`. It lasts 1 hour. It stops
+   working when it expires, is rotated or revoked, or the seller grant's actor no longer
+   owns that business. Refresh tokens (`exr_`) are never accepted as Bearer credentials.
+   Only SHA-256 digests of either token are stored.
+
 Delegations last 5 minutes to 24 hours (default 1 hour). Humans can revoke them.
 Every API call rechecks expiry and revocation. A delegated agent cannot issue or
 revoke credentials, create new buy requests or broaden its own authority.
@@ -45,6 +55,9 @@ No responses are cached. The harness listens on loopback port 8787 by default.
 | `POST /api/v1/delegations` | User session only; issue a credential for an owned request or seller |
 | `DELETE /api/v1/delegations/:id` | User session only; revoke an owned credential |
 | `POST /webhooks/stripe` | Raw body verified with Stripe signature; no user Bearer token |
+| `GET /api/v1/oauth/targets?client_id&redirect_uri` | User session only; consent screen data (below) |
+| `POST /api/v1/oauth/authorize` | User session only; issue a single-use authorization code (below) |
+| `POST /api/v1/oauth/token` | OAuth client authentication; RFC 6749 token endpoint (below) |
 
 Request creation takes:
 
@@ -72,6 +85,45 @@ Seller delegation example:
 Only pass the capabilities the worker needs. Creating a checkout link is not
 permission to pay; human approval remains in hosted Stripe Checkout. Seller
 delegation is read-only in this phase; offer/policy mutations remain future work.
+
+## Connector OAuth
+
+Spec: `doc/oauth-contract.md`. Code: `src/oauth.ts`. Schema and RPCs:
+`migrations/20261018000200_connector-oauth.sql`. Delegations, connector tokens and
+role tokens get `403 user_session_required` from the two consent routes.
+
+- **`GET /api/v1/oauth/targets?client_id=...&redirect_uri=...`** returns
+  `{ data: { client: { client_id, name }, account: { actor_id, email }, businesses: [{ seller_id, name }] } }`.
+  `email` comes from the verified InsForge user. `businesses` lists enabled sellers whose
+  `owner_id` is the actor. An unknown or revoked client gives `400 invalid_client`. A
+  `redirect_uri` that isn't an exact match for a registered one gives `400 invalid_redirect_uri`.
+  A missing or repeated parameter gives `400 invalid_request`.
+- **`POST /api/v1/oauth/authorize`** takes `{ client_id, redirect_uri, scope, state?, code_challenge,
+  code_challenge_method: "S256", target: { kind: "buyer" } | { kind: "seller", seller_id } }`. It
+  returns `{ data: { redirect_to } }`, which is `redirect_uri` plus `code` and `state`. The registered
+  URI's own query string is kept, and no `iss` is added. **PKCE S256 is required**: a missing
+  challenge or another method gives `400 invalid_request`. A seller the actor doesn't own,
+  or one that is disabled or missing, gives `403 forbidden`. If `scope` names `buyer` or `seller`
+  but not the chosen kind, the call gives `400 invalid_scope`. The code is stored as a SHA-256 hash,
+  lasts 5 minutes and can be used once.
+- **`POST /api/v1/oauth/token`** answers in plain RFC 6749 JSON, not the `{data}` envelope, with
+  `Cache-Control: no-store` and `Pragma: no-cache`. The body is `application/x-www-form-urlencoded`
+  (any `;charset` suffix) or JSON. The client authenticates with `client_id` and `client_secret` in
+  the body or with HTTP Basic. Using both is allowed only if they match; otherwise the call gives
+  `invalid_request`. Secrets are compared as SHA-256 digests in constant time.
+  - `grant_type=authorization_code` takes `code`, `redirect_uri` and `code_verifier` (S256).
+  - `grant_type=refresh_token` takes `refresh_token`. It rotates both tokens. If an already-rotated
+    refresh token is presented again, every token in that grant is revoked. Replaying an
+    authorization code also revokes the tokens it issued (RFC 6749 section 4.1.2).
+  - A successful call returns `200 {"access_token":"exc_...","token_type":"Bearer","expires_in":3600,"refresh_token":"exr_...","scope":"buyer"|"seller"}`.
+    Refresh tokens last 30 days, and each rotation starts a new 30 days.
+  - Errors: `400 invalid_request | invalid_grant | unsupported_grant_type` (with `error_description`),
+    or `401 invalid_client` with `WWW-Authenticate`.
+- **`GET /api/v1/me`** with an `exc_` token returns
+  `{ data: { kind: "connector", scope, actor_id, seller_id, client_id } }`.
+
+Code redemption and refresh rotation each run in one SQL transaction that locks the code or
+grant row. Concurrent requests therefore can't both receive tokens.
 
 ## MCP and dashboard integration
 
