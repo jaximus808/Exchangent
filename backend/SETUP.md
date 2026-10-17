@@ -6,7 +6,7 @@
 - API and schema contract: `backend/CONTRACT.md` (broader target).
 - Transaction foundation implemented in `migrations/` and `backend/src/`.
 - Authenticated requests, scoped agent credentials and status reads are documented
-  in `API.md`. Both database migrations are applied to the test backend.
+  in `API.md`. All three migrations, including negotiation, are applied to the test backend.
 - Stripe sandbox account: `acct_1URbMuIve5dAZQ3d`. Test-only CLI credentials exist
   locally. Claim the temporary sandbox before October 24, 2026.
 - A real sandbox Checkout Session was paid with Stripe's test card. The local
@@ -76,12 +76,33 @@ With the authenticated server running, run
 delegations administratively, exercise the actual API, and revoke them afterward.
 They do not claim to test a complete human OAuth/email verification flow.
 
+## Negotiation loop
+
+Spec: `doc/negotiation-contract.md`. Schema and RPCs: `migrations/20261017230000_negotiation.sql`
+(apply after the checkout and authenticated-commerce migrations). Routes live in `src/http.mjs`, rules and
+redaction in `src/negotiation.mjs`. Bearer tokens resolve through `commerce_principals`
+(sha256 only). Seed tokens expire after 24 hours and support `revoked_at`;
+the retired `COMMERCE_DEMO_TOKEN` is not accepted by the running server.
+The server dispatches 64-character hex demo tokens to these role-based routes;
+verified user sessions and `exg_` task delegations retain the scoped API in `API.md`.
+Negotiation tools currently require the seeded role token, not a user session or
+scoped delegation. Full account-linked MCP authentication remains pending.
+
+```sh
+npm run seed:negotiation --prefix backend   # writes backend/.demo-principals.json (gitignored)
+npm run test:db --prefix backend            # throwaway Docker postgres:16, all migrations, production HTTP loop
+```
+
+The seed reuses `DEMO_BUYER_ID` as the buyer when set, resets demo stock and prices, and
+rotates every seed token on each run. `test:db` never touches InsForge.
+
 ## Remaining integration work
 
 - Port the handlers to the agreed Next.js layout and connect the frontend's
   verified InsForge sign-in sessions. Complete a real human-login acceptance test.
-- Wire matching, seller onboarding/offer creation and negotiation sessions;
-  request creation currently queues a durable `request.created` outbox event.
+- Connect the frontend request form and user sessions to the structured negotiation
+  contract. The demo role API now creates matched sessions and negotiation events;
+  the frontend text-brief API still queues `request.created` for later processing.
 - Agree MCP OAuth mapping with the teammate. A provider's token is not automatically
   an InsForge user token; exchange through an authenticated account-link flow.
 - Add scheduled reconciliation: unpaid bound sessions release stock only after

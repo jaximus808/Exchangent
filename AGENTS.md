@@ -7,7 +7,7 @@
 - Agent owner: MCP server, agent loops, Inkbox transport and model behavior.
 - Do not overwrite the other owner's work. Coordinate the root Next.js scaffold
   and package manifest before adding them.
-- Read `doc/architecture.md`, `backend/CONTRACT.md`, `backend/API.md` and
+- Read `doc/architecture.md`, `doc/negotiation-contract.md`, `backend/CONTRACT.md`, `backend/API.md` and
   `backend/SETUP.md` for current boundaries.
 - Test payments only. Never connect personal Link or enable live payments without
   explicit user authorization. Keep private budgets and floors out of public data.

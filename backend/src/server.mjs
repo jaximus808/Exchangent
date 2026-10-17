@@ -3,6 +3,8 @@ import { pathToFileURL } from 'node:url';
 import { CommerceError, fromEnv } from './commerce.mjs';
 import { authFromEnv } from './auth.mjs';
 import { Activity } from './activity.mjs';
+import { Negotiation } from './negotiation.mjs';
+import { createHandler } from './http.mjs';
 
 async function body(req) {
   const chunks=[];let bytes=0;
@@ -23,7 +25,8 @@ async function json(req) {
     throw new CommerceError('invalid_json',400);
   }
 }
-export function createApp({commerce,auth,activity=new Activity(commerce)}) {
+export function createApp({commerce,auth,activity=new Activity(commerce),negotiation=new Negotiation({db:commerce.db})}) {
+  const negotiationHandler=createHandler({commerce,negotiation});
   return createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
     const send=(code,data)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
@@ -34,6 +37,10 @@ export function createApp({commerce,auth,activity=new Activity(commerce)}) {
         return send(200,{message:'Payment status is confirmed only by the verified Stripe webhook. Return to the assistant to check your order.'});
       if(req.method==='POST'&&path==='/webhooks/stripe')
         return send(200,{data:await commerce.webhook(await body(req),req.headers['stripe-signature'])});
+      // Seeded role tokens use a separate, expiring demo identity. User sessions and
+      // task delegations always pass through the scoped authentication path below.
+      if(/^Bearer [a-f0-9]{64}$/.test(req.headers.authorization??''))
+        return negotiationHandler(req,res);
       const principal=await auth.authenticate(req.headers.authorization);
       if(req.method==='GET'&&path==='/api/v1/me') return send(200,{data:{
         actor_id:principal.actorId,kind:principal.kind,scopes:principal.scopes??null,
