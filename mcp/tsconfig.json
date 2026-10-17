@@ -26,7 +26,8 @@
     "mcp-env.d.ts",
     "src/**/*",
     "test/**/*",
-    ".mcp-use/**/*.d.ts"
+    ".mcp-use/**/*.d.ts",
+    "views/**/*"
   ],
   "exclude": [
     "node_modules",

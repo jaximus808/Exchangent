@@ -49,7 +49,7 @@ before(async () => {
   backend = await startFakeBackend();
   process.env.EXCHANGENT_API_URL = backend.url;
   delete process.env.EXCHANGENT_TOKEN;
-  const { default: server } = await import("../index.ts");
+  const { default: server } = await import(new URL("../.mcp-use/build/index.js",import.meta.url).href);
   const { url } = await server.listen(0);
   mcpUrl = url;
   closeServer = () => server.close();
@@ -72,6 +72,22 @@ describe("exchangent mcp server", () => {
     }
     const counter = tools.find((t) => t.name === "counter_offer")!;
     assert.deepEqual([...(counter.inputSchema.required ?? [])].sort(), ["expected_version", "session_id", "total_cents"]);
+  });
+
+  test("eight tools expose distinct readable MCP App resources",async()=>{
+    const client=await connect("buyer-token");
+    const {tools}=await client.listTools();
+    const bound=tools.filter(t=>!!(t._meta?.ui as {resourceUri?:string}|undefined)?.resourceUri);
+    assert.equal(bound.length,8);
+    const uris=bound.map(t=>(t._meta!.ui as {resourceUri:string}).resourceUri);
+    assert.equal(new Set(uris).size,8);
+    for(const uri of uris) {
+      const resource=await client.readResource({uri});
+      const content=resource.contents[0];
+      assert.ok(content.mimeType?.startsWith('text/html'));
+      assert.ok('text' in content && content.text.includes('<script'));
+      assert.ok(!('text' in content && content.text.includes('rkcs_test_')));
+    }
   });
 
   test("create_buy_order forwards the caller's bearer header, an idempotency key and the body", async () => {
