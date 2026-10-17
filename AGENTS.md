@@ -1,0 +1,33 @@
+# AGENTS.md
+
+## Team ownership
+
+- Backend and payments owner: `backend/`, database migrations, API rules, inventory
+  reservations, matching, Stripe Checkout and webhooks.
+- Agent owner: MCP server, agent loops, Inkbox transport and model behavior.
+- Do not overwrite the other owner's work. Coordinate the root Next.js scaffold
+  and package manifest before adding them.
+- Read `doc/architecture.md`, `doc/negotiation-contract.md`, `backend/CONTRACT.md` and `backend/SETUP.md` for current boundaries.
+- Test payments only. Never connect personal Link or enable live payments without
+  explicit user authorization. Keep private budgets and floors out of public data.
+
+<!-- INSFORGE:START -->
+## InsForge backend
+
+This project uses [InsForge](https://insforge.dev): an all-in-one, open-source Postgres-based backend (BaaS) that gives this app a database, authentication, file storage, edge functions, realtime, an AI model gateway, and payments through one platform.
+
+- **Project:** **Exchangent** (API base `https://i3dmj4z4.us-west.insforge.app`)
+- **Skills:** these InsForge skills are installed for supported coding agents. Reach for them before implementing any InsForge feature instead of guessing the API:
+  - `insforge`: app code with the `@insforge/sdk` client (database CRUD, auth, storage, edge functions, realtime, AI, email, and Stripe payments).
+  - `insforge-cli`: backend and infrastructure via the `insforge` CLI (projects, SQL, migrations, RLS policies, storage buckets, functions, secrets, payment setup, schedules, deploys).
+  - `insforge-debug`: diagnosing failures (SDK/HTTP errors, RLS denials, auth and OAuth issues) and running security or performance audits.
+  - `insforge-integrations`: wiring external auth providers (Clerk, Auth0, WorkOS, Better Auth, etc.) for JWT-based RLS, or the OKX x402 payment facilitator.
+  - `find-skills`: discovering additional skills on demand.
+- **Credentials:** app code reads keys from `.env.local`; the CLI reads `.insforge/project.json`. Never hardcode or commit keys.
+
+Key patterns:
+
+- Database inserts take an array: `insert([{ ... }])`.
+- Reference users with `auth.users(id)`; use `auth.uid()` in RLS policies.
+- For storage uploads, persist both the returned `url` and `key`.
+<!-- INSFORGE:END -->

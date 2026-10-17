@@ -1,0 +1,23 @@
+{
+  "name": "@exchangent/backend",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file=.env.local src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "proof": "node --env-file=.env.local scripts/proof.mjs",
+    "test:integration": "node --env-file=.env.local --test test/integration.mjs",
+    "seed:negotiation": "node --env-file-if-exists=.env.local scripts/seed-negotiation.mjs",
+    "test:db": "sh test/sql/run.sh"
+  },
+  "dependencies": {
+    "@insforge/sdk": "1.5.2",
+    "stripe": "23.0.0"
+  },
+  "devDependencies": {
+    "pg": "8.16.3"
+  }
+}
