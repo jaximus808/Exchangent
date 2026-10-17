@@ -32,7 +32,8 @@ export type ApiEnvelope<T> = { data: T } | { error: ApiError };
 export type Row = Record<string, unknown>;
 export interface DbError { message: string; code?: string }
 export interface DbResult<T = unknown> { data: T | null; error: DbError | null }
-export interface DbRead<T = Row> {
+/** Awaiting a read without limit() returns every matching row, like the PostgREST builder. */
+export interface DbRead<T = Row> extends PromiseLike<DbResult<T[]>> {
  eq(column: string, value: unknown): this;
  order(column: string, options?: { ascending?: boolean }): this;
  limit(count: number): PromiseLike<DbResult<T[]>>;

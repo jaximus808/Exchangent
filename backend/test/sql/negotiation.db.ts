@@ -172,7 +172,12 @@ test('full negotiation loop through HTTP on real Postgres',async t=>{
  await t.test('commerce_reserve on the negotiated seller offer',async()=>{
   err(await call('POST',`/offers/${offer1.offer_id}/reservations`,buyer,undefined,randomUUID()),'stale_offer',409);
   const key=randomUUID();
-  const r=ok<ReservationRow>(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,undefined,key));
+  const stockBefore=await sql('SELECT id,available FROM commerce_inventory ORDER BY id');
+  err(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,{expected_total_cents:35999},key),'price_changed',409);
+  assert.deepEqual(await sql('SELECT id,available FROM commerce_inventory ORDER BY id'),stockBefore);
+  assert.equal((await sql('SELECT status FROM commerce_requests WHERE id=$1',[request.request_id]))[0].status,'negotiating');
+  assert.equal((await sql('SELECT count(*)::int AS n FROM commerce_reservations WHERE request_id=$1',[request.request_id]))[0].n,0);
+  const r=ok<ReservationRow>(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,{expected_total_cents:36000},key));
   assert.equal(r.total_cents,36000);assert.equal(r.status,'held');
   assert.equal(ok<ReservationRow>(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,undefined,key)).id,r.id);
   const stock=ok<InventoryItem[]>(await call('GET','/seller/inventory',bay.token));

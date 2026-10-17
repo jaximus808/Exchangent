@@ -31,7 +31,9 @@ export function pgDb(connectionString: string): PgDb {
   const q: DbRead={eq:(c,v)=>{filters.push([c,v]);return q;},
    order:(c,{ascending=true}={})=>{order=` ORDER BY ${ident(c)} ${ascending?'ASC':'DESC'}`;return q;},
    limit:n=>run(`SELECT ${columns(list)} FROM public.${ident(table)}${where(filters,1)}${order} LIMIT ${Math.trunc(n)}`,
-    filters.map(([,v])=>value(v)))};
+    filters.map(([,v])=>value(v))),
+   then:(ok,fail)=>run(`SELECT ${columns(list)} FROM public.${ident(table)}${where(filters,1)}${order}`,
+    filters.map(([,v])=>value(v))).then(ok,fail)};
   return q;
  };
  const update=(table: string,values: Row)=>{

@@ -193,15 +193,16 @@ export function registerTools(server: MCPServer) {
         "Buyer: accept a seller's current offer by reserving it. This atomically holds the items for a limited time but does NOT charge — the human pays later in Stripe Checkout (see get_checkout_link). Only seller-authored offers can be reserved, and only one active reservation per buy order.",
       inputSchema: z.object({
         offer_id: id("seller offer"),
+        expected_total_cents: cents("Exact all-in total reviewed by the human; reject if the saved offer differs").optional(),
         idempotency_key: idempotencyKey,
       }),
       outputSchema: resultSchema,
       annotations: mutation,
     },
-    async ({ offer_id, idempotency_key }, ctx) =>
+    async ({ offer_id, expected_total_cents, idempotency_key }, ctx) =>
       runTool(
         ctx as CallContext,
-        { method: "POST", path: `/offers/${seg(offer_id)}/reservations`, idempotencyKey: idempotency_key ?? deriveIdempotencyKey("reserve_offer", offer_id, undefined, {}) },
+        { method: "POST", path: `/offers/${seg(offer_id)}/reservations`, body: { expected_total_cents }, idempotencyKey: idempotency_key ?? deriveIdempotencyKey("reserve_offer", offer_id, undefined, {expected_total_cents}) },
         BUYER,
         { statusKey: "reservation_status", rename: { id: "reservation_id" } },
         (d) => `Items are held; call get_checkout_link with reservation_id ${d.reservation_id ?? ""} and give the link to the human to pay.`,

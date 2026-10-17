@@ -3,6 +3,7 @@ import { CommerceError } from './commerce.ts';
 import type { Commerce } from './commerce.ts';
 import { errorBody, fail, id } from './negotiation.ts';
 import type { Negotiation } from './negotiation.ts';
+import { checkoutReturn } from './checkout-return.ts';
 import type { RolePrincipal, RoleScope } from './types.ts';
 
 async function body(req: IncomingMessage) {
@@ -36,7 +37,7 @@ const routes: Route[]=[
  ['POST',/^\/api\/v1\/worker\/events\/([^/]+)\/ack$/,null,c=>c.n.ackEvent(c.p,c.m[1])],
  ['POST',/^\/api\/v1\/worker\/sellers\/([^/]+)\/agent$/,null,async c=>c.n.setAgentHandle(c.p,c.m[1],await json(c.req))],
  // Existing reservation and checkout routes: any buyer principal, unchanged behavior.
- ['POST',/^\/api\/v1\/offers\/([^/]+)\/reservations$/,'buyer',c=>c.commerce.reserve(c.p.actor_id,id(c.m[1]),c.key)],
+ ['POST',/^\/api\/v1\/offers\/([^/]+)\/reservations$/,'buyer',async c=>c.commerce.reserve(c.p.actor_id,id(c.m[1]),c.key,(await json(c.req)).expected_total_cents)],
  ['POST',/^\/api\/v1\/reservations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/checkout$/i,'buyer',c=>c.commerce.checkout(c.p.actor_id,id(c.m[1]))],
  ['GET',/^\/api\/v1\/reservations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i,'buyer',c=>c.commerce.status(c.p.actor_id,id(c.m[1]))],
 ];
@@ -48,7 +49,7 @@ export function createHandler({commerce,negotiation}: {commerce: Commerce; negot
    const url=new URL(req.url as string,'http://127.0.0.1'),path=url.pathname;
    if(req.method==='GET'&&path==='/health') return send(200,{status:'ok',mode:'test'});
    if(req.method==='GET'&&['/success','/cancel'].includes(path))
-     return send(200,{message:'Payment status is confirmed only by the verified Stripe webhook. Return to the assistant to check your order.'});
+     return checkoutReturn(res,path);
    if(req.method==='POST'&&path==='/webhooks/stripe')
      return send(200,{data:await commerce.webhook(await body(req),req.headers['stripe-signature'])});
    const p=await negotiation.principal(req.headers.authorization);

@@ -41,6 +41,7 @@ export const NEXT_ACTIONS: Partial<Record<ErrorCode,string>>={
  below_floor:'Raise unit_cents to at least each item\'s floor_cents (see get_inventory), or decline the request.',
  out_of_stock:'Offer fewer units or other inventory (see get_inventory), or decline the request.',
  budget_exceeded:'Counter or reserve at a total at or below your budget, or decline the seller.',
+ price_changed:'Refresh current offers and ask the human to review the updated total before reserving again.',
  requirements_mismatch:'Offer only inventory that matches the request requirements (category and attributes) and cover every requested item. Call get_inventory and get_negotiation.',
  offer_expired:'Ask the seller for a fresh offer, or reserve another current offer from list_offers.',
  seller_disabled:'This seller is unavailable. Pick another offer from list_offers.',

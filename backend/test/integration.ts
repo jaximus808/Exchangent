@@ -72,3 +72,14 @@ test('HTTP endpoint rejects missing auth and invalid webhook signature',async()=
  const hook=await fetch('http://127.0.0.1:8787/webhooks/stripe',{method:'POST',body:'{}',headers:{'stripe-signature':'invalid'}});
  assert.equal(hook.status,400);assert.equal(((await hook.json()) as {error: ApiError}).error.code,'invalid_signature');
 });
+test('reviewed price guard rolls back on the real demo database and retries once',async()=>{
+ const f=await fixture();const key=randomUUID();
+ await assert.rejects(commerce.reserve(f.buyer,f.offer,key,201),/price_changed/);
+ assert.equal((await commerce.row('commerce_inventory',f.inventory)).available,1);
+ assert.equal((await commerce.row('commerce_requests',f.request)).status,'negotiating');
+ const held=await commerce.reserve(f.buyer,f.offer,key,200);
+ const replay=await commerce.reserve(f.buyer,f.offer,key,200);
+ assert.equal(replay.id,held.id);assert.equal((await commerce.row('commerce_inventory',f.inventory)).available,0);
+ const receipt=await commerce.status(f.buyer,held.id);
+ assert.equal(receipt.total_cents,200);assert.equal(receipt.subtotal_cents,200);assert.equal(receipt.order,null);
+});

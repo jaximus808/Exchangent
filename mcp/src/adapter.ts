@@ -169,6 +169,8 @@ export function errorNext(code: string, nextAction: string | undefined, hint: Hi
       return "That idempotency key was already used for a different request; if you really intend a new action, retry with a new idempotency_key.";
     case "payment_pending":
       return "Payment is still processing; call get_reservation_status again in a little while.";
+    case "price_changed":
+      return "The saved total differs from the approved amount. Re-read the offers and ask the human to approve the current total before retrying.";
     case "invalid_input":
       return "The backend rejected the inputs; fix them according to the error message and retry once.";
     case "not_found":

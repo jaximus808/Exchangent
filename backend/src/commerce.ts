@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import { createAdminClient } from '@insforge/sdk';
 import type { InsForgeClient } from '@insforge/sdk';
-import type { Db, DbTable, ErrorCode, OrderSummary, PaymentResult, ReservationRow } from './types.ts';
+import type { Db, DbTable, ErrorCode, OfferRow, OrderSummary, PaymentResult, ReservationRow, SellerRow } from './types.ts';
 
 export class CommerceError extends Error {
   code: ErrorCode; status: number;
@@ -30,8 +30,11 @@ const handled = new Set<string>(['checkout.session.completed', 'checkout.session
   'checkout.session.async_payment_failed', 'checkout.session.expired']);
 const isHandled = (event: Stripe.Event): event is CheckoutEvent => handled.has(event.type);
 export interface CheckoutLink { reservation_id: string; session_id: string; url: string | null }
+export interface ReceiptItem { title: string; quantity: number; unit_cents: number }
 export interface ReservationStatusView {
-  reservation_id: string; status: ReservationRow['status']; total_cents: number; currency: string; order: OrderSummary | null;
+  reservation_id: string; status: ReservationRow['status']; total_cents: number; currency: string;
+  seller: Pick<SellerRow,'id'|'name'>; items: ReceiptItem[]; subtotal_cents: number;
+  delivery_cents: number; tax_cents: number; expires_at: string; order: OrderSummary | null;
 }
 export interface CommerceOptions { db: Db; stripe: Stripe; webhookSecret: string; baseUrl: string; integrationId: string }
 export class Commerce {
@@ -52,9 +55,12 @@ export class Commerce {
     if(!data?.length) throw new CommerceError('not_found',404);
     return data[0] as T;
   }
-  reserve(buyer: string, offer: string, key: unknown) {
+  reserve(buyer: string, offer: string, key: unknown, expectedTotal?: unknown) {
     if(typeof key!=='string'||key.length<1||key.length>200) throw new CommerceError('idempotency_key_required',400);
-    return this.rpc<ReservationRow>('commerce_reserve',{p_buyer:buyer,p_offer:offer,p_key:key});
+    if(expectedTotal!==undefined && (typeof expectedTotal!=='number'||!Number.isSafeInteger(expectedTotal)||expectedTotal<=0||expectedTotal>2147483647))
+      throw new CommerceError('invalid_input',400);
+    return this.rpc<ReservationRow>('commerce_reserve',{p_buyer:buyer,p_offer:offer,p_key:key,
+      ...(expectedTotal!==undefined?{p_expected_total:expectedTotal}:{})});
   }
   async checkout(buyer: string, id: string): Promise<CheckoutLink> {
     const r=await this.rpc<ReservationRow>('commerce_begin_checkout',{p_buyer:buyer,p_reservation:id});
@@ -97,10 +103,23 @@ export class Commerce {
   async status(buyer: string, id: string): Promise<ReservationStatusView> {
     const r=await this.row<ReservationRow>('commerce_reservations',id);
     if(r.buyer_id!==buyer) throw new CommerceError('forbidden',403);
+    const {data:items,error:itemsError}=await this.db.database.from('commerce_reservation_items')
+      .select('title,quantity,unit_cents').eq('reservation_id',id);
+    if(itemsError) throw new CommerceError('database_error',503);
+    // Reserved line snapshots: the receipt never re-reads live inventory prices.
+    const lines=(items??[]) as unknown as ReceiptItem[]; // DB boundary: columns selected above
+    const subtotal=lines.reduce((n,i)=>n+i.quantity*i.unit_cents,0);
+    const offer=await this.row<OfferRow>('commerce_offers',r.offer_id);
+    const seller=await this.row<SellerRow>('commerce_sellers',r.seller_id);
+    if(!lines.length||subtotal+offer.delivery_cents+offer.tax_cents!==r.total_cents)
+      throw new CommerceError('reservation_pricing_mismatch');
     const {data,error}=await this.db.database.from('commerce_orders')
       .select('id,status,total_cents,currency,created_at').eq('reservation_id',id).limit(1);
     if(error) throw new CommerceError('database_error',503);
-    return {reservation_id:r.id,status:r.status,total_cents:r.total_cents,currency:r.currency,order:(data?.[0] as OrderSummary | undefined)??null};
+    return {reservation_id:r.id,status:r.status,total_cents:r.total_cents,currency:r.currency,
+      seller:{id:seller.id,name:seller.name},items:lines,subtotal_cents:subtotal,
+      delivery_cents:offer.delivery_cents,tax_cents:offer.tax_cents,expires_at:r.expires_at,
+      order:(data?.[0] as OrderSummary | undefined)??null};
   }
 }
 // The SDK's PostgREST builder parses select() column strings at the type level, so a
