@@ -31,3 +31,4 @@ coverage/
 
 # Local MCP telemetry state
 .mcp-use/
+backend/public/
