@@ -17,6 +17,6 @@ const server = new MCPServer({
   ].join("\n"),
 });
 
-registerTools(server);
+export const {create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request}=registerTools(server);
 
 export default server;
