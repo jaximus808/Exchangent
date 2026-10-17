@@ -33,9 +33,12 @@ export class Commerce {
     if(!data?.length) throw new CommerceError('not_found',404);
     return data[0];
   }
-  reserve(buyer,offer,key) {
+  reserve(buyer,offer,key,expectedTotal) {
     if(typeof key!=='string'||key.length<1||key.length>200) throw new CommerceError('idempotency_key_required',400);
-    return this.rpc('commerce_reserve',{p_buyer:buyer,p_offer:offer,p_key:key});
+    if(expectedTotal!==undefined && (!Number.isSafeInteger(expectedTotal)||expectedTotal<=0||expectedTotal>2147483647))
+      throw new CommerceError('invalid_input',400);
+    return this.rpc('commerce_reserve',{p_buyer:buyer,p_offer:offer,p_key:key,
+      ...(expectedTotal!==undefined?{p_expected_total:expectedTotal}:{})});
   }
   async checkout(buyer,id) {
     const r=await this.rpc('commerce_begin_checkout',{p_buyer:buyer,p_reservation:id});
@@ -77,10 +80,21 @@ export class Commerce {
   async status(buyer,id) {
     const r=await this.row('commerce_reservations',id);
     if(r.buyer_id!==buyer) throw new CommerceError('forbidden',403);
+    const {data:items,error:itemsError}=await this.db.database.from('commerce_reservation_items')
+      .select('title,quantity,unit_cents').eq('reservation_id',id);
+    if(itemsError) throw new CommerceError('database_error',503);
+    const subtotal=(items??[]).reduce((n,i)=>n+i.quantity*i.unit_cents,0);
+    const offer=await this.row('commerce_offers',r.offer_id);
+    const seller=await this.row('commerce_sellers',r.seller_id);
+    if(!items?.length||subtotal+offer.delivery_cents+offer.tax_cents!==r.total_cents)
+      throw new CommerceError('reservation_pricing_mismatch');
     const {data,error}=await this.db.database.from('commerce_orders')
       .select('id,status,total_cents,currency,created_at').eq('reservation_id',id).limit(1);
     if(error) throw new CommerceError('database_error',503);
-    return {reservation_id:r.id,status:r.status,total_cents:r.total_cents,currency:r.currency,order:data?.[0]??null};
+    return {reservation_id:r.id,status:r.status,total_cents:r.total_cents,currency:r.currency,
+      seller:{id:seller.id,name:seller.name},items,subtotal_cents:subtotal,
+      delivery_cents:offer.delivery_cents,tax_cents:offer.tax_cents,expires_at:r.expires_at,
+      order:data?.[0]??null};
   }
 }
 export function fromEnv(env=process.env) {

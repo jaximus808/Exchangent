@@ -5,6 +5,7 @@ import { authFromEnv } from './auth.mjs';
 import { Activity } from './activity.mjs';
 import { Negotiation } from './negotiation.mjs';
 import { createHandler } from './http.mjs';
+import { checkoutReturn } from './checkout-return.mjs';
 
 async function body(req) {
   const chunks=[];let bytes=0;
@@ -15,9 +16,10 @@ async function body(req) {
   }
   return Buffer.concat(chunks);
 }
-async function json(req) {
+async function json(req,allowEmpty=false) {
   try {
-    const input=JSON.parse((await body(req)).toString());
+    const raw=await body(req);
+    const input=allowEmpty&&!raw.length?{}:JSON.parse(raw.toString());
     if(!input || typeof input!=='object' || Array.isArray(input)) throw new Error();
     return input;
   } catch(error) {
@@ -34,7 +36,7 @@ export function createApp({commerce,auth,activity=new Activity(commerce),negotia
       const path=new URL(req.url,'http://127.0.0.1').pathname;
       if(req.method==='GET'&&path==='/health') return send(200,{status:'ok',mode:'test'});
       if(req.method==='GET'&&['/success','/cancel'].includes(path))
-        return send(200,{message:'Payment status is confirmed only by the verified Stripe webhook. Return to the assistant to check your order.'});
+        return checkoutReturn(res,path);
       if(req.method==='POST'&&path==='/webhooks/stripe')
         return send(200,{data:await commerce.webhook(await body(req),req.headers['stripe-signature'])});
       // Seeded role tokens use a separate, expiring demo identity. User sessions and
@@ -59,7 +61,7 @@ export function createApp({commerce,auth,activity=new Activity(commerce),negotia
       match=path.match(/^\/api\/v1\/sellers\/([^/]+)\/activity$/);
       if(match&&req.method==='GET') return send(200,{data:await activity.seller(principal,match[1])});
       match=path.match(/^\/api\/v1\/offers\/([^/]+)\/reservations$/);
-      if(match&&req.method==='POST') return send(200,{data:await activity.reserve(principal,match[1],req.headers['idempotency-key'])});
+      if(match&&req.method==='POST') return send(200,{data:await activity.reserve(principal,match[1],req.headers['idempotency-key'],await json(req,true))});
       match=path.match(/^\/api\/v1\/reservations\/([^/]+)(\/checkout)?$/);
       if(match) {
         if(req.method==='POST'&&match[2]) return send(200,{data:await activity.checkout(principal,match[1])});

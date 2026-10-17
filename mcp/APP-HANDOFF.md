@@ -61,3 +61,19 @@ unpaid $360 UI-test checkout was expired afterward; no additional payment was ma
 ChatGPT/Claude production connector rendering still needs acceptance testing after
 Manufact deployment and per-user authentication are configured. The model keeps
 its reasoning in chat; the panels show recorded offers and actions.
+
+## Payment approval polish (fee-free demo)
+
+The review card sends `expected_total_cents` with `reserve_offer`. The new optional
+four-argument `commerce_reserve` overload rejects a different amount atomically;
+legacy callers remain supported. Apply
+`migrations/20261018000100_payment-approval.sql`, deploy the backend, then deploy
+this MCP build. Deploying the new widget before the backend/migration will make
+its reservation action fail rather than bypass the price check.
+
+Reservation status now includes the reserved item snapshots, seller name,
+delivery/tax breakdown and expiry. The panel hides checkout while payment is
+pending, and shows confirmation only for a consumed reservation with a confirmed
+order. Stripe success/cancel pages direct the human back to their conversation;
+neither redirect confirms payment or cancels a hold. The existing verified
+webhook remains the only payment confirmation path. No commission is charged.

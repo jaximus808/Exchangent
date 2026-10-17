@@ -166,7 +166,8 @@ describe("exchangent mcp server", () => {
 
   test("buyer checkout flow: reserve -> checkout link -> status", async () => {
     const client = await connect("buyer-token");
-    const reserve = await call(client, "reserve_offer", { offer_id: IDS.offer });
+    const reserve = await call(client, "reserve_offer", { offer_id: IDS.offer, expected_total_cents:36500 });
+    assert.deepEqual(backend.requests.at(-1)?.body,{expected_total_cents:36500});
     assert.equal(reserve.sc.reservation_id, IDS.reservation);
     assert.equal(reserve.sc.reservation_status, "held");
     const link = await call(client, "get_checkout_link", { reservation_id: IDS.reservation });

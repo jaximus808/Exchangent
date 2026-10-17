@@ -105,3 +105,17 @@ Positive human login, frontend OAuth/email verification and consent UI have not
 been tested end to end. The project's verification requirement was left enabled.
 Public hosting, rate limits, sign-in/session handling in Next.js, commission
 pricing, seller onboarding and worker matching remain future work.
+
+### Reviewed payment amount
+
+`POST /offers/:id/reservations` accepts an optional JSON body
+`{"expected_total_cents":36000}`. This must be a positive PostgreSQL integer in
+cents. If it differs from the reserved total, `price_changed` is returned and the
+entire hold rolls back. Refresh the offer and obtain human approval again.
+Existing callers may omit the body. No buyer commission is collected in the demo.
+
+`GET /reservations/:id` also returns `seller` (`id`, `name`), reserved `items`
+(`title`, `quantity`, `unit_cents`), `subtotal_cents`, `delivery_cents`, `tax_cents`
+and `expires_at`. These fields are owner-only. A checkout redirect is navigation;
+only the verified Stripe webhook creates a confirmed order. `payment_pending`
+means wait for verification rather than creating another payment.

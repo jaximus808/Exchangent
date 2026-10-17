@@ -59,11 +59,11 @@ export class Activity {
     if(r.buyer_id!==principal.actorId) throw new CommerceError('forbidden',403);
     return r;
   }
-  async reserve(principal,offerId,key) {
+  async reserve(principal,offerId,key,input={}) {
     if(!UUID.test(offerId)) throw new CommerceError('invalid_id',400);
     const o=await this.commerce.row('commerce_offers',offerId);
     authorize(principal,'reservation:write',{requestId:o.request_id});
-    return this.commerce.reserve(principal.actorId,offerId,key);
+    return this.commerce.reserve(principal.actorId,offerId,key,input.expected_total_cents);
   }
   async checkout(principal,id) {
     await this.reservation(principal,id,'checkout:write');
