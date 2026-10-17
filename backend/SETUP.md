@@ -120,14 +120,17 @@ balances and do not make live charges to test the application.
 
 ## Deploy on Vercel
 
-`backend/api/index.mjs` serves the same handler as `src/server.mjs` as one Vercel
-function; `backend/vercel.json` rewrites every path to it.
+`backend/api/index.mjs` serves the same app as `npm start` (`createApp` in
+`src/server.mjs`, including scoped authentication) as one Vercel function;
+`backend/vercel.json` rewrites every path to it. A public deployment is still a
+test-mode API: review it with the backend owner before sharing the URL.
 
 - Vercel project: Root Directory `backend`, Framework Preset `Other`, branch `manufact`.
 - Environment variables (test keys only): `INSFORGE_URL`, `INSFORGE_API_KEY`,
-  `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_INTEGRATION_ID`,
-  `COMMERCE_DEMO_TOKEN`, `DEMO_BUYER_ID`, `COMMERCE_BASE_URL=https://<app>.vercel.app`,
-  and `NODEJS_HELPERS=0` so the Stripe webhook receives the raw body.
+  `INSFORGE_ANON_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_INTEGRATION_ID`,
+  `COMMERCE_BASE_URL=https://<app>.vercel.app`, and `NODEJS_HELPERS=0` so the Stripe
+  webhook receives the raw body. Until they are set, every request returns a 500
+  naming the failing check (for example `missing_INSFORGE_URL` or `test_key_required`).
 - Stripe: add a sandbox webhook endpoint `https://<app>.vercel.app/webhooks/stripe`
   for the four checkout events and use its signing secret as `STRIPE_WEBHOOK_SECRET`.
 - Check: `curl https://<app>.vercel.app/health` returns `{"status":"ok","mode":"test"}`.
