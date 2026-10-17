@@ -20,6 +20,9 @@ cp .env.example .env.local      # adjust if needed
 npm start
 ```
 
+The runner is TypeScript that Node runs directly (type stripping, Node 22.18 or later); there is no build step.
+`npm run typecheck` runs `tsc --noEmit` over `src/`, `scripts/` and `test/`.
+
 Before you start, the backend must be running on port 8787 and seeded, and the MCP server must be running at
 `MCP_URL` (`http://127.0.0.1:3100/mcp` by default). The seed script writes `backend/.demo-principals.json`
 with the buyer, seller and worker tokens. The runner reads that file (`PRINCIPALS_FILE`).
@@ -135,17 +138,18 @@ never sends messages itself. Its only actions are MCP mutations, and the backend
 ## Tests
 
 ```bash
-npm test     # node --test test/*.test.mjs
+npm test             # node --test test/*.test.ts
+npm run typecheck    # tsc --noEmit
 ```
 
-- **`negotiation.e2e.test.mjs`:** runs a full negotiation with `TRANSPORT=local BRAIN=mock`. It uses a fake
+- **`negotiation.e2e.test.ts`:** runs a full negotiation with `TRANSPORT=local BRAIN=mock`. It uses a fake
   backend (the worker HTTP endpoints) and a fake MCP server (real MCP over Streamable HTTP, built with
   `@modelcontextprotocol/sdk`). The flow is `session.opened` → list offer → counter at target → 5% concession
   → split the difference → seller meets the counter → `READY TO RESERVE`. The test also checks:
   - Outbox totals are deliberately tampered with, and the agents still behave correctly.
   - The first ack fails, and the redelivered event is deduped.
   - Every MCP call uses the calling agent's own bearer token.
-- **`inkbox.test.mjs`:** tests the Inkbox transport with a mocked SDK, so it makes no network calls and needs
+- **`inkbox.test.ts`:** tests the Inkbox transport with a mocked SDK, so it makes no network calls and needs
   no keys. It covers:
   - signature verification with the real SDK `verifyWebhook`;
   - creating identities on demand, minting agent-scoped keys and registering handles;
@@ -153,9 +157,9 @@ npm test     # node --test test/*.test.mjs
   - deduplication;
   - the identity cap and HTTP 402 handling;
   - adopting existing identities after local state is lost.
-- **`claude.test.mjs`:** checks how the command is built, and checks with `claude --help` that the installed CLI
+- **`claude.test.ts`:** checks how the command is built, and checks with `claude --help` that the installed CLI
   still accepts every flag. It never runs a real turn.
-- **`mock-brain.test.mjs`:** checks the pricing and decision rules.
+- **`mock-brain.test.ts`:** checks the pricing and decision rules.
 
 ## Integration assumptions
 

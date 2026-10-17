@@ -1,8 +1,23 @@
 // Scripted brain: zero model tokens. Every turn re-reads state through MCP; numbers in the inbound
 // message are never used (only its IDs). Tool names follow doc/negotiation-contract.md.
 
-import { isToolError, toolErrorCode } from "../mcp.mjs";
-import { logger, money } from "../log.mjs";
+import { isToolError, toolErrorCode } from "../mcp.ts";
+import type {
+  BuyOrderResult,
+  CounterView,
+  DeclineResult,
+  InventoryItemView,
+  InventoryResult,
+  NegotiationResult,
+  OfferView,
+  RequirementLine,
+  Requirements,
+  ToolCaller,
+  Turn,
+} from "../mcp.ts";
+import { logger, money } from "../log.ts";
+import type { Agent } from "../agents.ts";
+import type { Brain, TurnEvent } from "../runner.ts";
 
 const log = logger("brain:mock");
 
@@ -11,23 +26,124 @@ export const CONCESSION = 0.05; // seller gives 5% per round, never below floor
 export const BUYER_STOP_ROUND = 3; // from round 3 on, any offer <= budget is acceptable
 export const BUYER_MAX_ROUNDS = 8; // safety valve: decline a seller that will not converge
 
-const SESSION_STATUSES = new Set(["open", "declined", "closed"]);
+export type SessionStatus = "open" | "declined" | "closed";
+const SESSION_STATUSES = new Set<unknown>(["open", "declined", "closed"]);
+
+function isSessionStatus(v: unknown): v is SessionStatus {
+  return SESSION_STATUSES.has(v);
+}
+
+// ---------- normalized shapes ----------
+
+/** Seller view of a session, normalized from get_negotiation. */
+export interface Negotiation {
+  sessionId: string | undefined;
+  requestId: string | undefined;
+  status: SessionStatus;
+  turn: Turn | undefined;
+  version: number;
+  rounds: number;
+  requirements: Requirements;
+  deliveryCents: number | undefined;
+  offers: OfferView[];
+  counters: CounterView[];
+  latestCounter: CounterView | null;
+  latestOffer: OfferView | null;
+}
+
+/** One inventory row, normalized from get_inventory. */
+export interface InventoryItem {
+  inventoryId: string | undefined;
+  title: string;
+  category: string | undefined;
+  attributes: Record<string, unknown>;
+  listCents: number;
+  floorCents: number;
+  available: number;
+}
+
+/** An inventory item picked for one requirement line. */
+export interface BundleItem extends InventoryItem {
+  quantity: number;
+}
+
+/** make_offer `items[]` entry. */
+export interface OfferLine {
+  inventory_id: string | undefined;
+  quantity: number;
+  unit_cents: number;
+}
+
+export interface BuyerOffer {
+  offerId: string | undefined;
+  totalCents: number;
+}
+
+export interface BuyerCounter {
+  counterId?: string;
+  totalCents: number;
+}
+
+/** One seller session as the buyer sees it, normalized from get_buy_order. */
+export interface BuyerSession {
+  sessionId?: string;
+  sellerName?: string;
+  status: string;
+  turn?: string;
+  version: number;
+  rounds: number;
+  offer: BuyerOffer | null;
+  counter: BuyerCounter | null;
+}
+
+/** Buyer view of a buy order, normalized from get_buy_order. */
+export interface BuyOrder {
+  requestId?: string;
+  budgetCents: number | null;
+  targetCents: number | null;
+  sessions: BuyerSession[];
+}
+
+export type SellerMove =
+  | { action: "offer"; lines: OfferLine[]; deliveryCents: number; note: string; reason: string }
+  | { action: "decline"; reason: string };
+
+// `totalCents?: never` on the other moves lets callers read `move.totalCents` without narrowing first.
+export type BuyerMove =
+  | { action: "ready"; session: BuyerSession; offer: BuyerOffer; totalCents?: never }
+  | { action: "counter"; session: BuyerSession; totalCents: number; reason: string }
+  | { action: "decline"; session: BuyerSession; totalCents?: never }
+  | { action: "wait"; reason: string; totalCents?: never };
+
+export type MockTurnResult =
+  | { action: "noop" }
+  | { action: "error"; code: string | null }
+  | { action: "decline"; result?: DeclineResult }
+  | { action: "offer"; reason: string; totalCents: number; offerId: string | undefined }
+  | { action: "ready"; offerId: string | undefined; totalCents: number; sessionId: string | undefined }
+  | { action: "counter"; totalCents: number; reason: string };
+
+export interface MockBrain extends Brain<MockTurnResult> {
+  name: "mock";
+  /** request_id -> offer the buyer is ready to reserve */
+  ready: Map<string, BuyerOffer>;
+}
 
 // ---------- normalizers (tolerant of the MCP server's exact result shape) ----------
 
-function arr(x) {
+function arr<T>(x: T[] | null | undefined): T[] {
   return Array.isArray(x) ? x : [];
 }
 
 /** Seller view of a session from get_negotiation. */
-export function normalizeNegotiation(raw) {
+export function normalizeNegotiation(raw: NegotiationResult | null | undefined): Negotiation {
   const s = raw?.session || raw?.negotiation || raw || {};
   const history = arr(s.history);
   const offers = s.offers ? arr(s.offers) : history.filter((h) => h.offer_id || /offer/.test(h.type || h.kind || ""));
   const counters = s.counters ? arr(s.counters) : history.filter((h) => h.counter_id || /counter/.test(h.type || h.kind || ""));
   // The tool envelope also has a `status` ("ok"/"error"); only treat it as the session status if it is one.
   const statusCandidates = [s.session_status, raw?.session_status, s.status, raw?.session?.status];
-  const sessionStatus = statusCandidates.find((v) => SESSION_STATUSES.has(v)) || "open";
+  const sessionStatus = statusCandidates.find(isSessionStatus) || "open";
   return {
     sessionId: s.session_id || s.id,
     requestId: s.request_id || s.request?.id || s.request?.request_id,
@@ -44,7 +160,7 @@ export function normalizeNegotiation(raw) {
   };
 }
 
-export function normalizeInventory(raw) {
+export function normalizeInventory(raw: InventoryResult | InventoryItemView[] | null | undefined): InventoryItem[] {
   const list = Array.isArray(raw) ? raw : raw?.inventory || raw?.items || raw?.data || [];
   return arr(list).map((i) => ({
     inventoryId: i.inventory_id || i.id,
@@ -58,15 +174,15 @@ export function normalizeInventory(raw) {
 }
 
 /** Buyer view from get_buy_order. */
-export function normalizeOrder(raw) {
+export function normalizeOrder(raw: BuyOrderResult | null | undefined): BuyOrder {
   const o = raw?.request || raw?.buy_order || raw || {};
-  const sessions = arr(o.sessions).map((s) => {
+  const sessions = arr(o.sessions).map((s): BuyerSession => {
     const offer = s.current_offer || s.latest_offer || null;
     const counter = s.latest_counter || null;
     return {
       sessionId: s.session_id || s.id,
       sellerName: s.seller_name || s.seller?.name || s.seller_id,
-      status: SESSION_STATUSES.has(s.status) ? s.status : s.session_status || "open",
+      status: isSessionStatus(s.status) ? s.status : s.session_status || "open",
       turn: s.turn,
       version: s.version ?? 0,
       rounds: s.rounds ?? (offer ? 1 : 0), // backend: number of seller offers in the session
@@ -85,7 +201,7 @@ export function normalizeOrder(raw) {
 
 // ---------- seller pricing ----------
 
-function satisfies(req, item) {
+function satisfies(req: RequirementLine, item: InventoryItem): boolean {
   if (req.category && item.category !== req.category) return false;
   for (const [k, v] of Object.entries(req)) {
     if (k === "category" || k === "quantity") continue;
@@ -105,9 +221,10 @@ function satisfies(req, item) {
 }
 
 /** Cheapest in-stock item per requirement line (desk satisfying width, chair, ...). null if any line is unmet. */
-export function pickBundle(inventory, requirements) {
-  const lines = arr(requirements?.items).length ? requirements.items : [{ category: "desk" }, { category: "chair" }];
-  const bundle = [];
+export function pickBundle(inventory: InventoryItem[], requirements: Requirements | null | undefined): BundleItem[] | null {
+  const items = arr(requirements?.items);
+  const lines: RequirementLine[] = items.length ? items : [{ category: "desk" }, { category: "chair" }];
+  const bundle: BundleItem[] = [];
   for (const req of lines) {
     const quantity = Number(req.quantity || 1);
     const used = new Set(bundle.map((b) => b.inventoryId));
@@ -120,12 +237,12 @@ export function pickBundle(inventory, requirements) {
   return bundle;
 }
 
-export function bundleMinItemsCents(bundle) {
+export function bundleMinItemsCents(bundle: BundleItem[]): number {
   return bundle.reduce((s, b) => s + b.floorCents * b.quantity, 0);
 }
 
 /** Split an items total across lines: every line at least its floor, surplus weighted by list-floor headroom. */
-export function allocateAtTotal(bundle, itemsTotalCents) {
+export function allocateAtTotal(bundle: BundleItem[], itemsTotalCents: number): OfferLine[] {
   const floors = bundle.map((b) => b.floorCents * b.quantity);
   const surplus = itemsTotalCents - floors.reduce((a, b) => a + b, 0);
   if (surplus < 0) throw new Error("allocation below floor");
@@ -142,7 +259,7 @@ export function allocateAtTotal(bundle, itemsTotalCents) {
 }
 
 /** Next seller price per line: list on the first offer, then 5% below the previous unit price, floored. */
-export function concedeLines(bundle, previousOffer, priorOfferCount) {
+export function concedeLines(bundle: BundleItem[], previousOffer: OfferView | null | undefined, priorOfferCount: number): OfferLine[] {
   const prevItems = arr(previousOffer?.items);
   return bundle.map((b) => {
     const prev = prevItems.find((p) => (p.inventory_id || p.id) === b.inventoryId)?.unit_cents;
@@ -152,20 +269,20 @@ export function concedeLines(bundle, previousOffer, priorOfferCount) {
   });
 }
 
-const sumLines = (lines, delivery) => lines.reduce((s, l) => s + l.unit_cents * l.quantity, 0) + delivery;
+const sumLines = (lines: OfferLine[], delivery: number): number => lines.reduce((s, l) => s + l.unit_cents * l.quantity, 0) + delivery;
 
 /**
  * Decide the seller's move from MCP state only. Returns { action: "offer", lines, deliveryCents, note, reason }
  * or { action: "decline", reason }.
  */
-export function decideSeller(neg, inventory) {
+export function decideSeller(neg: Negotiation, inventory: InventoryItem[]): SellerMove {
   const bundle = pickBundle(inventory, neg.requirements);
   if (!bundle) return { action: "decline", reason: "No in-stock items meet the requirements." };
   const deliveryCents = Number(neg.deliveryCents ?? 0);
   const minTotal = bundleMinItemsCents(bundle) + deliveryCents;
   const counter = neg.latestCounter;
   const counterTotal = counter ? Number(counter.total_cents) : null;
-  if (counter && counterTotal >= minTotal) {
+  if (counter && counterTotal !== null && counterTotal >= minTotal) {
     return {
       action: "offer",
       lines: allocateAtTotal(bundle, counterTotal - deliveryCents),
@@ -194,9 +311,9 @@ export function decideSeller(neg, inventory) {
  * Returns { action: "ready", session, offer } | { action: "counter", session, totalCents, reason } |
  *         { action: "decline", session } | { action: "wait", reason }.
  */
-export function decideBuyer(order, sessionId) {
+export function decideBuyer(order: BuyOrder, sessionId: string | undefined): BuyerMove {
   const { targetCents, budgetCents } = order;
-  const open = order.sessions.filter((s) => s.status === "open" && s.offer);
+  const open = order.sessions.filter((s): s is BuyerSession & { offer: BuyerOffer } => s.status === "open" && Boolean(s.offer));
   const acceptable = open.filter((s) => {
     const t = s.offer.totalCents;
     if (targetCents !== null && t <= targetCents) return true;
@@ -213,7 +330,8 @@ export function decideBuyer(order, sessionId) {
   if (s.turn && s.turn !== "buyer") return { action: "wait", reason: "not our turn" };
   if (!s.offer) return { action: "wait", reason: "no offer yet" };
   if (s.rounds >= BUYER_MAX_ROUNDS) return { action: "decline", session: s };
-  let total = s.counter ? Math.round((s.counter.totalCents + s.offer.totalCents) / 2) : targetCents;
+  // targetCents is null only when the order has no budget either (normalizeOrder); Math.min then treats it as 0, as before.
+  let total = s.counter ? Math.round((s.counter.totalCents + s.offer.totalCents) / 2) : (targetCents as number);
   if (budgetCents !== null) total = Math.min(total, budgetCents);
   total = Math.min(total, s.offer.totalCents - 1);
   return { action: "counter", session: s, totalCents: total, reason: s.counter ? "splits the difference" : "counters at target" };
@@ -221,11 +339,11 @@ export function decideBuyer(order, sessionId) {
 
 // ---------- the brain ----------
 
-export function createMockBrain({ mcpFor }) {
-  const ready = new Map(); // request_id -> offer the buyer is ready to reserve
-  const sessionRequest = new Map(); // session_id -> request_id (session.declined carries only session_id)
+export function createMockBrain({ mcpFor }: { mcpFor: (agent: Agent) => Promise<ToolCaller> }): MockBrain {
+  const ready = new Map<string, BuyerOffer>(); // request_id -> offer the buyer is ready to reserve
+  const sessionRequest = new Map<string, string>(); // session_id -> request_id (session.declined carries only session_id)
 
-  async function sellerTurn(agent, event, attempt = 0) {
+  async function sellerTurn(agent: Agent, event: TurnEvent, attempt = 0): Promise<MockTurnResult> {
     const sessionId = event.payload?.session_id;
     if (event.kind === "session.declined") {
       log.info("buyer declined; nothing to do", { agent: agent.id, session: sessionId });
@@ -266,7 +384,7 @@ export function createMockBrain({ mcpFor }) {
     return { action: "offer", reason: move.reason, totalCents: r.total_cents ?? total, offerId: r.offer_id };
   }
 
-  async function buyerTurn(agent, event, attempt = 0) {
+  async function buyerTurn(agent: Agent, event: TurnEvent, attempt = 0): Promise<MockTurnResult> {
     const sessionId = event.payload?.session_id;
     if (event.payload?.request_id && sessionId) sessionRequest.set(sessionId, event.payload.request_id);
     const requestId = event.payload?.request_id || sessionRequest.get(sessionId);
@@ -276,7 +394,7 @@ export function createMockBrain({ mcpFor }) {
       return { action: "noop" };
     }
     if (ready.has(requestId)) {
-      log.info("already ready to reserve; ignoring", { agent: agent.id, offer_id: ready.get(requestId).offerId });
+      log.info("already ready to reserve; ignoring", { agent: agent.id, offer_id: ready.get(requestId)!.offerId });
       return { action: "noop" };
     }
     const mcp = await mcpFor(agent);

@@ -6,13 +6,66 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { logger } from "../log.mjs";
+import { logger } from "../log.ts";
+import type { Agent } from "../agents.ts";
+import type { Brain, TurnEvent } from "../runner.ts";
 
 const log = logger("brain:claude");
 
 export const BUYER_FORBIDDEN_TOOLS = ["reserve_offer", "get_checkout_link", "create_buy_order"];
 
-export function sellerPersona(agent) {
+/** The exact command for one turn, plus the files to write into its working directory first. */
+export interface ClaudeInvocation {
+  cmd: string;
+  args: string[];
+  cwd: string;
+  /** absolute path -> contents (written with mode 0600) */
+  files: Record<string, string>;
+}
+
+/** `claude -p --output-format json` result (only the fields this brain reads). */
+export interface ClaudeOutput {
+  type?: string;
+  is_error?: boolean;
+  result?: string;
+  num_turns?: number;
+  total_cost_usd?: number;
+  [key: string]: unknown;
+}
+
+export type ClaudeTurnResult =
+  | { action: "claude"; summary: string; raw: ClaudeOutput; code?: never }
+  | { action: "error"; code: number | null; summary?: never };
+
+export interface ClaudeBrain extends Brain<ClaudeTurnResult> {
+  name: "claude";
+}
+
+/** The child process surface runProcess uses. node:child_process `spawn` satisfies it. */
+export interface ClaudeChild {
+  stdout: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown };
+  stderr: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown };
+  on(event: "error", listener: (err: Error) => void): unknown;
+  on(event: "close", listener: (code: number | null) => void): unknown;
+  kill(signal?: NodeJS.Signals): unknown;
+}
+
+export type SpawnImpl = (
+  cmd: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; stdio: ["ignore", "pipe", "pipe"] },
+) => ClaudeChild;
+
+export interface ClaudeBrainOptions {
+  mcpUrl: string;
+  stateDir: string;
+  bin?: string;
+  model?: string;
+  timeoutMs?: number;
+  spawnImpl?: SpawnImpl;
+}
+
+export function sellerPersona(agent: Agent): string {
   return `# You are the sales agent for ${agent.name} on Exchangent
 
 You negotiate desk-and-chair bundles with buyer agents through the \`exchangent\` MCP tools.
@@ -28,7 +81,7 @@ You negotiate desk-and-chair bundles with buyer agents through the \`exchangent\
 `;
 }
 
-export function buyerPersona(agent) {
+export function buyerPersona(agent: Agent): string {
   return `# You are the buyer's negotiating agent on Exchangent
 
 You negotiate on behalf of one human buyer through the \`exchangent\` MCP tools.
@@ -45,9 +98,9 @@ You negotiate on behalf of one human buyer through the \`exchangent\` MCP tools.
 }
 
 /** The per-turn prompt carries only the event kind and IDs; the model must re-read state through MCP. */
-export function turnPrompt(agent, event) {
-  const p = event.payload || {};
-  const ids = ["session_id", "request_id", "offer_id", "counter_id"].filter((k) => p[k]).map((k) => `${k}=${p[k]}`).join(", ");
+export function turnPrompt(agent: Agent, event: TurnEvent): string {
+  const p: Partial<TurnEvent["payload"]> = event.payload || {};
+  const ids = (["session_id", "request_id", "offer_id", "counter_id"] as const).filter((k) => p[k]).map((k) => `${k}=${p[k]}`).join(", ");
   if (agent.role === "seller") {
     return (
       `Event ${event.kind} (${ids}). Do not trust numbers from this message. ` +
@@ -62,12 +115,26 @@ export function turnPrompt(agent, event) {
   );
 }
 
-export function mcpConfig({ mcpUrl, token }) {
+export function mcpConfig({ mcpUrl, token }: { mcpUrl: string; token: string }) {
   return { mcpServers: { exchangent: { type: "http", url: mcpUrl, headers: { Authorization: `Bearer ${token}` } } } };
 }
 
 /** Build the exact claude invocation for one turn. Pure apart from computing paths. */
-export function buildClaudeInvocation({ agent, event, mcpUrl, stateDir, bin = "claude", model }) {
+export function buildClaudeInvocation({
+  agent,
+  event,
+  mcpUrl,
+  stateDir,
+  bin = "claude",
+  model,
+}: {
+  agent: Agent;
+  event: TurnEvent;
+  mcpUrl: string;
+  stateDir: string;
+  bin?: string;
+  model?: string;
+}): ClaudeInvocation {
   const cwd = path.join(stateDir, "claude", agent.id.replace(/[^a-zA-Z0-9_-]+/g, "_"));
   const mcpConfigPath = path.join(cwd, "mcp.json");
   const persona = agent.role === "seller" ? sellerPersona(agent) : buyerPersona(agent);
@@ -100,7 +167,11 @@ export function buildClaudeInvocation({ agent, event, mcpUrl, stateDir, bin = "c
   };
 }
 
-function runProcess(spawnImpl, { cmd, args, cwd }, timeoutMs) {
+function runProcess(
+  spawnImpl: SpawnImpl,
+  { cmd, args, cwd }: ClaudeInvocation,
+  timeoutMs: number,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawnImpl(cmd, args, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -113,7 +184,7 @@ function runProcess(spawnImpl, { cmd, args, cwd }, timeoutMs) {
   });
 }
 
-export function createClaudeBrain({ mcpUrl, stateDir, bin, model, timeoutMs = 180000, spawnImpl = spawn }) {
+export function createClaudeBrain({ mcpUrl, stateDir, bin, model, timeoutMs = 180000, spawnImpl = spawn }: ClaudeBrainOptions): ClaudeBrain {
   return {
     name: "claude",
     async turn(agent, event) {
@@ -122,13 +193,14 @@ export function createClaudeBrain({ mcpUrl, stateDir, bin, model, timeoutMs = 18
       for (const [file, content] of Object.entries(inv.files)) writeFileSync(file, content, { mode: 0o600 });
       log.info("claude -p turn", { agent: agent.id, kind: event.kind, session: event.payload?.session_id });
       const { code, stdout, stderr } = await runProcess(spawnImpl, inv, timeoutMs);
-      let out = null;
-      try { out = JSON.parse(stdout); } catch { /* fall through */ }
+      let out: ClaudeOutput | null = null;
+      // The CLI prints one JSON object for --output-format json; it is not validated field by field.
+      try { out = JSON.parse(stdout) as ClaudeOutput | null; } catch { /* fall through */ }
       if (code !== 0 || !out || out.is_error) {
         log.error("claude turn failed", { agent: agent.id, exit: code, error: (out?.result || stderr || stdout).slice(0, 300) });
         return { action: "error", code };
       }
-      const summary = String(out.result || "").trim().split("\n").at(-1).slice(0, 300);
+      const summary = String(out.result || "").trim().split("\n").at(-1)!.slice(0, 300); // split() never returns []
       log.info(`says: ${summary}`, { agent: agent.id, turns: out.num_turns, cost_usd: out.total_cost_usd });
       return { action: "claude", summary, raw: out };
     },

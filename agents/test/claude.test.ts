@@ -6,17 +6,19 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { buildClaudeInvocation, createClaudeBrain, turnPrompt } from "../src/brains/claude.mjs";
-import { buyerAgent, sellerAgent } from "../src/agents.mjs";
+import { buildClaudeInvocation, createClaudeBrain, turnPrompt } from "../src/brains/claude.ts";
+import type { SpawnImpl } from "../src/brains/claude.ts";
+import { buyerAgent, sellerAgent } from "../src/agents.ts";
+import type { TurnEvent } from "../src/runner.ts";
 
 process.env.LOG_SILENT ??= "1";
 
 const seller = sellerAgent({ seller_id: "s-acme", name: "Acme Desks", token: "tok-acme-secret" });
 const buyer = buyerAgent({ actor_id: "b1", token: "tok-buyer-secret" });
-const counterEvent = { id: "e1", kind: "counter.created", payload: { session_id: "sess-1", counter_id: "c-1", total_cents: 31337 } };
-const offerEvent = { id: "e2", kind: "offer.created", payload: { session_id: "sess-1", request_id: "req-1", offer_id: "o-1", total_cents: 31337 } };
+const counterEvent: TurnEvent = { id: "e1", kind: "counter.created", payload: { session_id: "sess-1", counter_id: "c-1", total_cents: 31337 } };
+const offerEvent: TurnEvent = { id: "e2", kind: "offer.created", payload: { session_id: "sess-1", request_id: "req-1", offer_id: "o-1", total_cents: 31337 } };
 
-const flagValue = (args, flag) => args[args.indexOf(flag) + 1];
+const flagValue = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
 
 test("seller invocation: flags, MCP config with bearer token, persona, no numbers in the prompt", () => {
   const stateDir = "/tmp/x-state";
@@ -62,13 +64,14 @@ test("buyer invocation: persona hides budget, reservation tools disallowed, --mo
 
 test("createClaudeBrain writes owner-only files and parses --output-format json (spawn faked)", async () => {
   const stateDir = mkdtempSync(path.join(tmpdir(), "agents-claude-"));
-  const spawned = [];
-  const fakeSpawn = (cmd, args, opts) => {
+  const spawned: Array<{ cmd: string; args: string[]; opts: Parameters<SpawnImpl>[2] }> = [];
+  const fakeSpawn: SpawnImpl = (cmd, args, opts) => {
     spawned.push({ cmd, args, opts });
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
-    child.kill = () => {};
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill: () => {},
+    });
     setImmediate(() => {
       child.stdout.emit("data", JSON.stringify({ type: "result", is_error: false, result: "Countered.\nMade offer o-9 at $340.", num_turns: 4, total_cost_usd: 0.01 }));
       child.emit("close", 0);

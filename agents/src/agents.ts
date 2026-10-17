@@ -1,6 +1,31 @@
 // Agent registry built from the demo principals file. One buyer agent, one agent per seller.
 
-export function slugify(s) {
+import type { BuyerPrincipal, Principals, SellerPrincipal } from "./config.ts";
+
+export type AgentRole = "buyer" | "seller";
+
+interface AgentBase {
+  id: string;
+  role: AgentRole;
+  name: string;
+  slug: string;
+  token: string;
+}
+
+export interface BuyerAgent extends AgentBase {
+  id: "buyer";
+  role: "buyer";
+  buyerId: string;
+}
+
+export interface SellerAgent extends AgentBase {
+  role: "seller";
+  sellerId: string;
+}
+
+export type Agent = BuyerAgent | SellerAgent;
+
+export function slugify(s: string | null | undefined): string {
   return String(s || "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -10,11 +35,11 @@ export function slugify(s) {
     .replace(/-$/, "");
 }
 
-export function buyerAgent(buyer) {
+export function buyerAgent(buyer: BuyerPrincipal): BuyerAgent {
   return { id: "buyer", role: "buyer", name: "Buyer agent", slug: "buyer", token: buyer.token, buyerId: buyer.actor_id };
 }
 
-export function sellerAgent(seller) {
+export function sellerAgent(seller: SellerPrincipal): SellerAgent {
   return {
     id: `seller:${seller.seller_id}`,
     role: "seller",
@@ -26,17 +51,22 @@ export function sellerAgent(seller) {
 }
 
 export class AgentRegistry {
-  /** @param {() => object} readPrincipals re-read on unknown seller (the seed may have re-run) */
-  constructor(principals, readPrincipals) {
+  readPrincipals: (() => Principals) | undefined;
+  // Both are set by #load, which the constructor always calls.
+  declare buyer: BuyerAgent;
+  declare sellers: Map<string, SellerAgent>;
+
+  /** @param readPrincipals re-read on unknown seller (the seed may have re-run) */
+  constructor(principals: Principals, readPrincipals?: () => Principals) {
     this.readPrincipals = readPrincipals;
     this.#load(principals);
   }
 
   /** Called with each agent that appears after construction (principals file re-read). */
-  onNew = null;
+  onNew: ((agent: SellerAgent) => void) | null = null;
 
-  #load(p) {
-    const before = this.sellers;
+  #load(p: Principals): void {
+    const before: Map<string, SellerAgent> | undefined = this.sellers;
     this.buyer = this.buyer || buyerAgent(p.buyer);
     this.sellers = new Map(
       p.sellers.map((s) => {
@@ -48,11 +78,11 @@ export class AgentRegistry {
     if (before && this.onNew) for (const [id, a] of this.sellers) if (!before.has(id)) this.onNew(a);
   }
 
-  all() {
+  all(): Agent[] {
     return [this.buyer, ...this.sellers.values()];
   }
 
-  seller(sellerId) {
+  seller(sellerId: string): SellerAgent | null {
     if (!this.sellers.has(sellerId) && this.readPrincipals) {
       try { this.#load(this.readPrincipals()); } catch { /* keep the old registry */ }
     }

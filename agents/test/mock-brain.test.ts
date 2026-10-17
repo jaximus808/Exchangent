@@ -1,13 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allocateAtTotal, decideBuyer, decideSeller, normalizeInventory, normalizeNegotiation, pickBundle } from "../src/brains/mock.mjs";
-import { parseToolResult } from "../src/mcp.mjs";
-import { REQUIREMENTS, createMarket } from "./fakes.mjs";
+import { allocateAtTotal, decideBuyer, decideSeller, normalizeInventory, normalizeNegotiation, pickBundle } from "../src/brains/mock.ts";
+import type { BuyOrder } from "../src/brains/mock.ts";
+import { parseToolResult } from "../src/mcp.ts";
+import { REQUIREMENTS, createMarket } from "./fakes.ts";
 
 const inventory = normalizeInventory({ inventory: createMarket().sellers[0].inventory });
 
 test("pickBundle honours max_width_in and ergonomic, picks cheapest qualifying", () => {
-  assert.deepEqual(pickBundle(inventory, REQUIREMENTS).map((b) => b.inventoryId), ["acme-desk-46", "acme-chair"]);
+  assert.deepEqual(pickBundle(inventory, REQUIREMENTS)!.map((b) => b.inventoryId), ["acme-desk-46", "acme-chair"]);
   assert.equal(pickBundle(inventory, { items: [{ category: "desk", max_width_in: 30 }] }), null);
 });
 
@@ -20,17 +21,19 @@ test("seller concession is clamped at floor and meets a counter at/above its min
   const prev = { items: [{ inventory_id: "acme-desk-46", unit_cents: 18500 }, { inventory_id: "acme-chair", unit_cents: 10200 }] };
   const neg = normalizeNegotiation({ session: { status: "open", turn: "seller", version: 4, requirements: REQUIREMENTS, delivery_cents: 2000, offers: [{}, prev], counters: [{ total_cents: 29000 }] } });
   const move = decideSeller(neg, inventory);
+  assert.equal(move.action, "offer");
   assert.deepEqual(move.lines.map((l) => l.unit_cents), [18000, 10000]);
   assert.equal(move.reason, "best price");
 
   neg.latestCounter = { total_cents: 31111 };
   const meet = decideSeller(neg, inventory);
+  assert.equal(meet.action, "offer");
   assert.equal(meet.reason, "meets counter");
   assert.equal(meet.lines.reduce((s, l) => s + l.unit_cents * l.quantity, 0) + meet.deliveryCents, 31111);
 });
 
 test("allocateAtTotal: exact total, every line >= floor", () => {
-  const bundle = pickBundle(inventory, REQUIREMENTS);
+  const bundle = pickBundle(inventory, REQUIREMENTS)!;
   for (const total of [28000, 28001, 33333, 40000]) {
     const lines = allocateAtTotal(bundle, total);
     assert.equal(lines.reduce((s, l) => s + l.unit_cents, 0), total);
@@ -39,7 +42,7 @@ test("allocateAtTotal: exact total, every line >= floor", () => {
 });
 
 test("buyer: target first, split the difference, accept <= budget only after round 3", () => {
-  const order = (rounds, offer, counter) => ({
+  const order = (rounds: number, offer: number, counter: number | null): BuyOrder => ({
     targetCents: 28000,
     budgetCents: 38000,
     sessions: [{ sessionId: "s", status: "open", turn: "buyer", version: 3, rounds, offer: { offerId: "o", totalCents: offer }, counter: counter ? { totalCents: counter } : null }],

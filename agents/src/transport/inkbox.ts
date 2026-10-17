@@ -8,21 +8,106 @@
 
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { JsonState } from "../state.mjs";
-import { publicPayload, toMessage } from "./index.mjs";
-import { logger, money, short } from "../log.mjs";
+import type {
+  A2AClient,
+  A2AResolvedTarget,
+  A2AWebhookEventType,
+  A2AWebhookPayload,
+  AgentIdentity,
+  Inkbox,
+  InkboxOptions,
+  verifyWebhook,
+} from "@inkbox/sdk";
+import type { connect, TunnelListener } from "@inkbox/sdk/tunnels/connect";
+import { JsonState } from "../state.ts";
+import { publicPayload, toMessage } from "./index.ts";
+import type { MessageHandler, PublicPayload, Transport, TransportMessage } from "./index.ts";
+import type { Agent } from "../agents.ts";
+import type { EventKind, WorkerEvent } from "../backend.ts";
+import { logger, money, short } from "../log.ts";
 
 const log = logger("transport:inkbox");
 
 export const WEBHOOK_PATH = "/inkbox/webhook";
-export const A2A_EVENT_TYPES = ["a2a.task.created", "a2a.task.message"];
+export const A2A_EVENT_TYPES: A2AWebhookEventType[] = ["a2a.task.created", "a2a.task.message"];
+
+/** The parts of @inkbox/sdk this transport uses (injected in tests). */
+export interface InkboxSdk {
+  Inkbox: new (options: InkboxOptions) => Inkbox;
+  connect: typeof connect;
+  verifyWebhook: typeof verifyWebhook;
+}
+
+/** Registers a seller's Inkbox handle with the backend (WorkerApi.registerSellerAgent). */
+export interface SellerRegistrar {
+  registerSellerAgent(sellerId: string, agentHandle: string): Promise<unknown>;
+}
+
+/** Dependencies injected next to the config (runner, tests). */
+export interface InkboxTransportDeps {
+  /** WorkerApi, used to register seller handles */
+  backend?: SellerRegistrar;
+  /** { Inkbox, connect, verifyWebhook } (injected in tests) */
+  sdk?: InkboxSdk;
+  now?: () => number;
+}
+
+export interface InkboxTransportOptions extends InkboxTransportDeps {
+  /** admin-scoped Inkbox key (creates identities, mints agent keys, subscriptions) */
+  apiKey?: string;
+  baseUrl?: string;
+  a2aBaseUrl?: string;
+  /** max identities this runner may create (free plan: 3) */
+  identityCap?: number;
+  handlePrefix?: string;
+  stateDir: string;
+}
+
+/** One provisioned identity, persisted in .state/identities.json. */
+export interface IdentityRecord {
+  handle: string;
+  identity_id: string;
+  public_host: string;
+  created_at: string;
+  agent_api_key?: string;
+  a2a_enabled?: boolean;
+  subscription_id?: string;
+  signing_key?: string;
+  registered?: boolean;
+}
+
+export interface InkboxState {
+  /** agent id -> identity */
+  identities: Record<string, IdentityRecord>;
+  /** negotiation session id -> A2A context id */
+  contexts: Record<string, string>;
+}
+
+/** The `data` part of an A2A message: the public event fields minus the note. */
+export type A2AEventData = Omit<PublicPayload, "note"> & { kind: EventKind; event_id: string; created_at: string | null };
+
+/** A2A message parts for one outbox event: one structured data part + a short text part. */
+export type A2AEventParts = [{ data: A2AEventData }, { text: string }];
+
+export type SignatureCheck = { ok: true; reason?: undefined } | { ok: false; reason: string };
 
 export class IdentityCapError extends Error {
-  constructor(message) {
+  code: string;
+
+  constructor(message: string) {
     super(message);
     this.name = "IdentityCapError";
     this.code = "inkbox_identity_cap";
   }
+}
+
+/** HTTP status of an Inkbox SDK error (InkboxAPIError.statusCode), if any. */
+function statusCode(err: unknown): unknown {
+  return (err as { statusCode?: unknown } | null | undefined)?.statusCode;
+}
+
+function isRecord(x: unknown): x is Record<string, unknown> {
+  return x !== null && typeof x === "object";
 }
 
 /**
@@ -30,9 +115,23 @@ export class IdentityCapError extends Error {
  * verifyWebhook (HMAC-SHA256 over "{request_id}.{timestamp}.{raw_body}", header "sha256=<hex>").
  * The SDK helper does not check the timestamp window itself, so it is checked here.
  */
-export function verifyInkboxSignature({ raw, headers, secret, verify, nowMs = Date.now(), toleranceSec = 300 }) {
+export function verifyInkboxSignature({
+  raw,
+  headers,
+  secret,
+  verify,
+  nowMs = Date.now(),
+  toleranceSec = 300,
+}: {
+  raw: Buffer | string;
+  headers?: Record<string, string | string[] | undefined> | null;
+  secret?: string | null;
+  verify: typeof verifyWebhook;
+  nowMs?: number;
+  toleranceSec?: number;
+}): SignatureCheck {
   if (!secret) return { ok: false, reason: "no signing key stored for this identity" };
-  const h = {};
+  const h: Record<string, string | undefined> = {};
   for (const [k, v] of Object.entries(headers || {})) h[k.toLowerCase()] = Array.isArray(v) ? v[0] : v;
   const ts = Number(h["x-inkbox-timestamp"]);
   if (!h["x-inkbox-signature"] || !h["x-inkbox-request-id"] || !Number.isFinite(ts)) {
@@ -48,7 +147,7 @@ export function verifyInkboxSignature({ raw, headers, secret, verify, nowMs = Da
   return ok ? { ok: true } : { ok: false, reason: "signature mismatch" };
 }
 
-export function sanitizeHandle(s) {
+export function sanitizeHandle(s: string): string {
   return String(s)
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, "-")
@@ -59,48 +158,64 @@ export function sanitizeHandle(s) {
 }
 
 /** Build the A2A message parts for an outbox event: one structured data part + a short text part. */
-export function eventParts(fromAgent, event) {
+export function eventParts(fromAgent: Agent | null | undefined, event: WorkerEvent): A2AEventParts {
   const msg = toMessage(fromAgent, event);
   const { note, ...ids } = msg.payload;
-  const data = { kind: msg.kind, event_id: msg.id, created_at: msg.created_at, ...ids };
+  const data: A2AEventData = { kind: msg.kind, event_id: msg.id, created_at: msg.created_at, ...ids };
   const total = ids.total_cents !== undefined ? ` total ${money(ids.total_cents)}` : "";
   const text = `${msg.kind} session ${short(ids.session_id)}${total}${note ? ` - "${String(note).slice(0, 140)}"` : ""}. Re-read the session via MCP before acting.`;
   return [{ data }, { text }];
 }
 
+/**
+ * True for the data part eventParts() wrote. Only `kind` and `event_id` are checked; the sender is one of
+ * our own identities (the webhook signature and caller handle were verified), so the rest is trusted.
+ */
+function isEventDataPart(p: unknown): p is { data: A2AEventData } {
+  return isRecord(p) && isRecord(p.data) && Boolean(p.data.kind && p.data.event_id);
+}
+
 /** Reverse of eventParts: find the data part we sent and rebuild the transport message. */
-export function messageFromParts(parts, fromAgentId = null) {
-  const dataPart = (parts || []).find((p) => p && typeof p.data === "object" && p.data?.kind && p.data?.event_id);
+export function messageFromParts(parts: unknown[] | null | undefined, fromAgentId: string | null = null): TransportMessage | null {
+  const dataPart = (parts || []).find(isEventDataPart);
   if (!dataPart) return null;
   const d = dataPart.data;
   return { id: d.event_id, kind: d.kind, created_at: d.created_at ?? null, from: fromAgentId, payload: publicPayload(d) };
 }
 
-async function loadSdk() {
+async function loadSdk(): Promise<InkboxSdk> {
   const sdk = await import("@inkbox/sdk");
   const tunnels = await import("@inkbox/sdk/tunnels/connect");
   return { Inkbox: sdk.Inkbox, verifyWebhook: sdk.verifyWebhook, connect: tunnels.connect };
 }
 
-export class InkboxTransport {
+export class InkboxTransport implements Transport {
   name = "inkbox";
-  #handlers = new Map();
-  #pending = new Map();
-  #listeners = new Map();
-  #agentClients = new Map();
-  #a2aClients = new Map();
-  #cards = new Map();
-  #seenWebhooks = new Set();
-  #agents = new Map();
+  #handlers = new Map<string, MessageHandler>();
+  #pending = new Map<string, Promise<IdentityRecord>>();
+  #listeners = new Map<string, TunnelListener>();
+  #agentClients = new Map<string, AgentIdentity>();
+  #a2aClients = new Map<string, A2AClient>();
+  #cards = new Map<string, A2AResolvedTarget>();
+  #seenWebhooks = new Set<string>();
+  #agents = new Map<string, Agent>();
 
-  /**
-   * @param {object} o
-   * @param {string} o.apiKey admin-scoped Inkbox key (creates identities, mints agent keys, subscriptions)
-   * @param {number} o.identityCap max identities this runner may create (free plan: 3)
-   * @param {object} [o.backend] WorkerApi, used to register seller handles
-   * @param {object} [o.sdk] { Inkbox, connect, verifyWebhook } (injected in tests)
-   */
-  constructor({ apiKey, baseUrl, a2aBaseUrl = "https://inkbox.ai", identityCap = 3, handlePrefix = "exchangent", stateDir, backend, sdk, now = () => Date.now() }) {
+  apiKey: string | undefined;
+  baseUrl: string | undefined;
+  a2aBaseUrl: string;
+  identityCap: number;
+  handlePrefix: string;
+  stateDir: string;
+  backend: SellerRegistrar | undefined;
+  sdkPromise: Promise<InkboxSdk>;
+  now: () => number;
+  state: JsonState<InkboxState>;
+  /** Admin client, created on first use. */
+  admin?: Inkbox;
+  /** Set once Inkbox answers 402 (plan limit), so later events fail fast. */
+  planLimitError?: string;
+
+  constructor({ apiKey, baseUrl, a2aBaseUrl = "https://inkbox.ai", identityCap = 3, handlePrefix = "exchangent", stateDir, backend, sdk, now = () => Date.now() }: InkboxTransportOptions) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
     this.a2aBaseUrl = a2aBaseUrl;
@@ -110,14 +225,14 @@ export class InkboxTransport {
     this.backend = backend;
     this.sdkPromise = sdk ? Promise.resolve(sdk) : loadSdk();
     this.now = now;
-    this.state = new JsonState(path.join(stateDir, "identities.json"), { identities: {}, contexts: {} });
+    this.state = new JsonState<InkboxState>(path.join(stateDir, "identities.json"), { identities: {}, contexts: {} });
   }
 
-  async #sdk() {
+  async #sdk(): Promise<InkboxSdk> {
     return this.sdkPromise;
   }
 
-  async #admin() {
+  async #admin(): Promise<Inkbox> {
     if (!this.admin) {
       const { Inkbox } = await this.#sdk();
       this.admin = new Inkbox({ apiKey: this.apiKey, baseUrl: this.baseUrl });
@@ -125,13 +240,13 @@ export class InkboxTransport {
     return this.admin;
   }
 
-  onMessage(agent, handler) {
+  onMessage(agent: Agent, handler: MessageHandler): void {
     this.#handlers.set(agent.id, handler);
     this.#agents.set(agent.id, agent);
   }
 
   /** Reconnect tunnels for identities created in earlier runs and catch up on queued tasks. */
-  async start(agents) {
+  async start(agents: Agent[]): Promise<void> {
     for (const agent of agents) {
       this.#agents.set(agent.id, agent);
       if (this.state.data.identities[agent.id]) {
@@ -139,26 +254,26 @@ export class InkboxTransport {
           await this.ensureIdentity(agent);
           await this.#catchUp(agent);
         } catch (err) {
-          log.error("could not resume identity", { agent: agent.id, error: err.message });
+          log.error("could not resume identity", { agent: agent.id, error: (err as Error).message });
         }
       }
     }
   }
 
-  identityFor(agentId) {
+  identityFor(agentId: string): IdentityRecord | null {
     return this.state.data.identities[agentId] || null;
   }
 
   /** Create (or finish provisioning) the agent's Inkbox identity. Idempotent; safe to call per event. */
-  ensureIdentity(agent, hintHandle) {
+  ensureIdentity(agent: Agent, hintHandle?: string): Promise<IdentityRecord> {
     if (!this.#pending.has(agent.id)) {
       const p = this.#provision(agent, hintHandle).finally(() => this.#pending.delete(agent.id));
       this.#pending.set(agent.id, p);
     }
-    return this.#pending.get(agent.id);
+    return this.#pending.get(agent.id)!; // set just above if missing
   }
 
-  async #provision(agent, hintHandle) {
+  async #provision(agent: Agent, hintHandle?: string): Promise<IdentityRecord> {
     const ids = this.state.data.identities;
     let rec = ids[agent.id];
     if (!rec) {
@@ -196,7 +311,7 @@ export class InkboxTransport {
     if (!rec.subscription_id || !rec.signing_key) {
       const url = `https://${rec.public_host}${WEBHOOK_PATH}`;
       const existing = await admin.webhooks.subscriptions.list({ agentIdentityId: rec.identity_id, url }).catch(() => []);
-      let signingKey = null;
+      let signingKey: string | null = null;
       if (existing.length) {
         rec.subscription_id = existing[0].id;
       } else {
@@ -224,27 +339,27 @@ export class InkboxTransport {
     return rec;
   }
 
-  async #createIdentity(agent, hintHandle) {
+  async #createIdentity(agent: Agent, hintHandle?: string): Promise<IdentityRecord> {
     const admin = await this.#admin();
     const base = sanitizeHandle(hintHandle || `${this.handlePrefix}-${agent.slug}`);
     const opts = { displayName: agent.name.slice(0, 80), description: `Exchangent ${agent.role} agent` };
-    const toRec = (identity) => ({
+    const toRec = (identity: AgentIdentity): IdentityRecord => ({
       handle: identity.agentHandle,
       identity_id: identity.id,
       public_host: identity.tunnel?.publicHost || `${identity.agentHandle}.inkboxwire.com`,
       created_at: new Date().toISOString(),
     });
-    const capError = (err) => {
+    const capError = (err: unknown) => {
       this.planLimitError =
-        `Inkbox refused to create another identity (HTTP 402: ${err.message}). The free plan allows 3 identities. ` +
+        `Inkbox refused to create another identity (HTTP 402: ${(err as Error).message}). The free plan allows 3 identities. ` +
         `Upgrade the plan, seed fewer sellers, or use TRANSPORT=local; restart the runner afterwards.`;
       return new IdentityCapError(this.planLimitError);
     };
     try {
       return toRec(await admin.createIdentity(base, opts));
     } catch (err) {
-      if (err?.statusCode === 402) throw capError(err);
-      if (err?.statusCode !== 409) throw err;
+      if (statusCode(err) === 402) throw capError(err);
+      if (statusCode(err) !== 409) throw err;
       // Handle taken. If it is ours (state was lost), adopt it; otherwise add a random suffix once.
       try {
         const mine = await admin.getIdentity(base);
@@ -255,40 +370,40 @@ export class InkboxTransport {
       try {
         return toRec(await admin.createIdentity(retry, opts));
       } catch (err2) {
-        if (err2?.statusCode === 402) throw capError(err2);
+        if (statusCode(err2) === 402) throw capError(err2);
         throw err2;
       }
     }
   }
 
-  async #agentIdentity(agentId) {
+  async #agentIdentity(agentId: string): Promise<AgentIdentity> {
     if (!this.#agentClients.has(agentId)) {
       const rec = this.state.data.identities[agentId];
       const { Inkbox } = await this.#sdk();
       const client = new Inkbox({ apiKey: rec.agent_api_key, baseUrl: this.baseUrl });
       this.#agentClients.set(agentId, await client.getIdentity(rec.handle));
     }
-    return this.#agentClients.get(agentId);
+    return this.#agentClients.get(agentId)!; // set just above if missing
   }
 
-  async #a2a(agentId) {
+  async #a2a(agentId: string): Promise<A2AClient> {
     if (!this.#a2aClients.has(agentId)) {
       const me = await this.#agentIdentity(agentId);
       this.#a2aClients.set(agentId, await me.a2aClient());
     }
-    return this.#a2aClients.get(agentId);
+    return this.#a2aClients.get(agentId)!; // set just above if missing
   }
 
-  async #card(fromId, handle) {
+  async #card(fromId: string, handle: string): Promise<A2AResolvedTarget> {
     const key = `${fromId}->${handle}`;
     if (!this.#cards.has(key)) {
       const a2a = await this.#a2a(fromId);
       this.#cards.set(key, await a2a.fetchCard(`${this.a2aBaseUrl}/a2a/${handle}/card`));
     }
-    return this.#cards.get(key);
+    return this.#cards.get(key)!; // set just above if missing
   }
 
-  async #listen(agent, rec) {
+  async #listen(agent: Agent, rec: IdentityRecord): Promise<void> {
     const { connect } = await this.#sdk();
     const admin = await this.#admin();
     const listener = await connect(admin, {
@@ -302,7 +417,7 @@ export class InkboxTransport {
   }
 
   /** Tunnel handler: verify, dedupe, ack the A2A task fast, push into the agent mailbox. */
-  async handleWebhook(agentId, req) {
+  async handleWebhook(agentId: string, req: Request): Promise<Response> {
     if (req.method !== "POST") return new Response("ok");
     if (new URL(req.url).pathname !== WEBHOOK_PATH) return new Response("not found", { status: 404 });
     const raw = Buffer.from(await req.arrayBuffer());
@@ -314,8 +429,9 @@ export class InkboxTransport {
       log.warn("webhook rejected", { agent: agentId, reason: check.reason });
       return new Response("invalid signature", { status: 401 });
     }
-    let body;
-    try { body = JSON.parse(raw.toString("utf8")); } catch { return new Response("bad json", { status: 400 }); }
+    let body: A2AWebhookPayload;
+    // The signature check above proves Inkbox sent this body, so it follows the SDK's webhook payload type.
+    try { body = JSON.parse(raw.toString("utf8")) as A2AWebhookPayload; } catch { return new Response("bad json", { status: 400 }); }
     if (this.#seenWebhooks.has(body.id)) return new Response("duplicate");
     this.#seenWebhooks.add(body.id);
     if (!A2A_EVENT_TYPES.includes(body.event_type)) return new Response("ignored");
@@ -336,17 +452,18 @@ export class InkboxTransport {
     return new Response("ok");
   }
 
-  #completeTask(agentId, taskId) {
+  #completeTask(agentId: string, taskId: string | undefined): void {
     if (!taskId) return;
     this.#agentIdentity(agentId)
       .then((me) => me.a2aReply(taskId, { intent: "complete", text: "received" }))
-      .catch((err) => {
-        if (!/terminal/i.test(err?.message || "")) log.warn("a2aReply failed", { agent: agentId, task: taskId, error: err?.message });
+      .catch((err: unknown) => {
+        const message = (err as Error | null | undefined)?.message;
+        if (!/terminal/i.test(message || "")) log.warn("a2aReply failed", { agent: agentId, task: taskId, error: message });
       });
   }
 
   /** Recovery path after downtime: tasks still "submitted" in this identity's inbox. */
-  async #catchUp(agent) {
+  async #catchUp(agent: Agent): Promise<void> {
     const me = await this.#agentIdentity(agent.id);
     const handler = this.#handlers.get(agent.id);
     if (!handler || typeof me.iterA2ATasks !== "function") return;
@@ -363,7 +480,7 @@ export class InkboxTransport {
   }
 
   /** Send one outbox event as an A2A message from fromAgent's identity to toAgent's identity. */
-  async send(fromAgent, toAgent, event) {
+  async send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<void> {
     if (!fromAgent) {
       throw new Error(`cannot tell which seller sent ${event.kind}; the backend should set route.seller_id on buyer-bound events`);
     }
@@ -378,7 +495,8 @@ export class InkboxTransport {
       ...(contextId ? { contextId } : {}),
       parts: eventParts(fromAgent, event),
     });
-    const newContext = result?.kind === "task" ? result.task?.contextId : result?.message?.contextId;
+    // A2AWireMessage types its extra fields as unknown; contextId is a string per A2A 1.0.
+    const newContext = result?.kind === "task" ? result.task?.contextId : (result?.message?.contextId as string | undefined);
     if (sessionId && newContext && !contextId) {
       this.state.data.contexts[sessionId] = newContext;
       this.state.save();
@@ -386,7 +504,7 @@ export class InkboxTransport {
     log.info("a2a sent", { from: fromAgent.id, to: toRec.handle, kind: event.kind, event: event.id, context: short(newContext || contextId) });
   }
 
-  async close() {
+  async close(): Promise<void> {
     for (const l of this.#listeners.values()) await l.close().catch(() => {});
     this.#listeners.clear();
   }
