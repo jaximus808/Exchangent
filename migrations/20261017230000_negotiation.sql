@@ -13,12 +13,12 @@ ALTER TABLE public.commerce_inventory
  ADD COLUMN attributes jsonb NOT NULL DEFAULT '{}' CHECK(jsonb_typeof(attributes) = 'object');
 ALTER TABLE public.commerce_requests
  ADD COLUMN title text CHECK(length(title) <= 200),
- ADD COLUMN requirements jsonb NOT NULL DEFAULT '{}' CHECK(jsonb_typeof(requirements) = 'object'),
+ ADD COLUMN structured_requirements jsonb NOT NULL DEFAULT '{}' CHECK(jsonb_typeof(structured_requirements) = 'object'),
  ADD COLUMN target_cents integer CHECK(target_cents > 0),
  ADD COLUMN deadline timestamptz,
  ADD COLUMN delegate_negotiation boolean NOT NULL DEFAULT true,
  ADD COLUMN idempotency_key text CHECK(length(idempotency_key) BETWEEN 1 AND 200),
- ADD COLUMN created_at timestamptz NOT NULL DEFAULT now(),
+ ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
  ADD CONSTRAINT commerce_requests_buyer_key UNIQUE(buyer_id, idempotency_key);
 
 CREATE TABLE public.commerce_sessions (
@@ -63,6 +63,7 @@ CREATE TABLE public.commerce_principals (
  scope text NOT NULL CHECK(scope IN ('buyer','seller','worker')),
  seller_id uuid REFERENCES public.commerce_sellers,
  label text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now(),
+ expires_at timestamptz NOT NULL DEFAULT now()+interval '24 hours', revoked_at timestamptz,
  CHECK((scope = 'seller') = (seller_id IS NOT NULL))
 );
 CREATE INDEX commerce_sessions_seller ON public.commerce_sessions(seller_id);
@@ -131,13 +132,13 @@ BEGIN
  IF NOT public.commerce_valid_requirements(p_requirements) OR p_budget_cents IS NULL OR p_budget_cents <= 0
    OR p_target_cents <= 0 OR p_target_cents > p_budget_cents OR length(p_title) > 200 THEN
    RAISE EXCEPTION 'invalid_input'; END IF;
- INSERT INTO public.commerce_requests(buyer_id,budget_cents,title,requirements,target_cents,deadline,delegate_negotiation,idempotency_key)
+ INSERT INTO public.commerce_requests(buyer_id,budget_cents,title,structured_requirements,target_cents,deadline,delegate_negotiation,idempotency_key)
  VALUES(p_buyer,p_budget_cents,p_title,p_requirements,p_target_cents,p_deadline,coalesce(p_delegate,true),p_key)
  ON CONFLICT ON CONSTRAINT commerce_requests_buyer_key DO NOTHING RETURNING * INTO q;
  IF q.id IS NULL THEN
    -- Retry (possibly concurrent): the winning transaction has committed by now.
    SELECT * INTO q FROM public.commerce_requests WHERE buyer_id=p_buyer AND idempotency_key=p_key;
-   IF q.requirements<>p_requirements OR q.budget_cents<>p_budget_cents OR q.target_cents IS DISTINCT FROM p_target_cents
+   IF q.structured_requirements<>p_requirements OR q.budget_cents<>p_budget_cents OR q.target_cents IS DISTINCT FROM p_target_cents
      OR q.title IS DISTINCT FROM p_title THEN RAISE EXCEPTION 'idempotency_conflict'; END IF;
    RETURN public.commerce_request_summary(q.id);
  END IF;
@@ -207,10 +208,10 @@ BEGIN
  total := total + delivery;
  IF total > 2147483647 THEN RAISE EXCEPTION 'invalid_input'; END IF;
  -- Every line must fit a requested item and every requested item must be covered.
- IF jsonb_typeof(q.requirements->'items') = 'array' AND (
+ IF jsonb_typeof(q.structured_requirements->'items') = 'array' AND (
    EXISTS (SELECT 1 FROM jsonb_array_elements(lines) e JOIN public.commerce_inventory i ON i.id=(e->>'inventory_id')::uuid
-    WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(q.requirements->'items') r WHERE public.commerce_item_matches(i.attributes,i.category,r)))
-   OR EXISTS (SELECT 1 FROM jsonb_array_elements(q.requirements->'items') r WHERE NOT EXISTS (
+    WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(q.structured_requirements->'items') r WHERE public.commerce_item_matches(i.attributes,i.category,r)))
+   OR EXISTS (SELECT 1 FROM jsonb_array_elements(q.structured_requirements->'items') r WHERE NOT EXISTS (
     SELECT 1 FROM jsonb_array_elements(lines) e JOIN public.commerce_inventory i ON i.id=(e->>'inventory_id')::uuid
     WHERE public.commerce_item_matches(i.attributes,i.category,r) AND (e->>'quantity')::integer >= coalesce((r->>'quantity')::integer,1)))
  ) THEN RAISE EXCEPTION 'requirements_mismatch'; END IF;
@@ -317,7 +318,7 @@ $$;
 
 CREATE FUNCTION public.commerce_request_json(p_request uuid)
 RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
- SELECT jsonb_build_object('request_id',q.id,'buyer_id',q.buyer_id,'title',q.title,'status',q.status,'requirements',q.requirements,
+ SELECT jsonb_build_object('request_id',q.id,'buyer_id',q.buyer_id,'title',q.title,'status',q.status,'requirements',q.structured_requirements,
   'budget_cents',q.budget_cents,'target_cents',q.target_cents,'currency',q.currency,'deadline',q.deadline,
   'delegate_negotiation',q.delegate_negotiation,'created_at',q.created_at)
  FROM public.commerce_requests q WHERE q.id=p_request
@@ -350,7 +351,7 @@ $$;
 CREATE FUNCTION public.commerce_seller_sessions(p_seller uuid, p_status text)
 RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
  SELECT coalesce(jsonb_agg(public.commerce_session_json(s.id) || jsonb_build_object('request',jsonb_build_object(
-   'request_id',q.id,'title',q.title,'status',q.status,'requirements',q.requirements,'deadline',q.deadline,'created_at',q.created_at))
+   'request_id',q.id,'title',q.title,'status',q.status,'requirements',q.structured_requirements,'deadline',q.deadline,'created_at',q.created_at))
   ORDER BY s.created_at, s.id),'[]'::jsonb)
  FROM public.commerce_sessions s JOIN public.commerce_requests q ON q.id=s.request_id
  WHERE s.seller_id=p_seller AND (p_status IS NULL OR s.status=p_status)
@@ -367,7 +368,7 @@ $$;
 CREATE FUNCTION public.commerce_resolve_principal(p_token_hash text)
 RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
  SELECT jsonb_build_object('actor_id',p.actor_id,'scope',p.scope,'seller_id',p.seller_id,'label',p.label)
- FROM public.commerce_principals p WHERE p.token_hash=p_token_hash
+ FROM public.commerce_principals p WHERE p.token_hash=p_token_hash AND p.revoked_at IS NULL AND p.expires_at>now()
 $$;
 
 -- Worker feed: negotiation events only (order.confirmed belongs to the email sender).

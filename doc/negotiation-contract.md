@@ -52,7 +52,7 @@ backend mutation that commits together with an outbox row.
   (for example `{"width_in": 46}`)
 - `commerce_requests`: add
   - `title text`
-  - `requirements jsonb not null default '{}'`
+  - `structured_requirements jsonb not null default '{}'` (HTTP field remains `requirements`; existing text brief is preserved)
   - `target_cents int` (private)
   - `deadline timestamptz`
   - `delegate_negotiation boolean default true`
@@ -81,13 +81,16 @@ backend mutation that commits together with an outbox row.
   - `actor_id`
   - `scope` (`buyer` | `seller` | `worker`)
   - `seller_id` (nullable)
-  - `label`
+  - `label`, `expires_at` (24 hours by default), `revoked_at`
 - RLS and revokes on every new table and function, matching the existing migration's pattern.
 
 ## HTTP API (all under `/api/v1`, `Authorization: Bearer <token>`)
 
 The backend resolves the token to a principal: sha256 the token, then look it up in `commerce_principals`.
-The legacy `COMMERCE_DEMO_TOKEN` still resolves to the buyer `DEMO_BUYER_ID`.
+The production server accepts 64-character hex demo role tokens on this contract;
+seed tokens expire after 24 hours and can be revoked. The legacy `COMMERCE_DEMO_TOKEN`
+is rejected. Verified user sessions and `exg_` task delegations continue through
+`backend/API.md`; account-linking these to the negotiation tools is still pending.
 
 ### Buyer scope
 

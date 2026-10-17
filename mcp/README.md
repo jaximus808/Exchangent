@@ -142,3 +142,13 @@ mcp/
 ├── src/adapter.ts      # bearer forwarding, idempotency keys, envelope + error/next mapping, $ formatting
 └── test/               # fake backend (node:http) + MCP client end-to-end tests
 ```
+
+## Verified local integration
+
+With the backend running and `backend/.demo-principals.json` seeded, run
+`npm run test:integration --prefix mcp` from the repository root. This explicit check
+uses real InsForge data through MCP, negotiates a $465 offer down to $360, then
+declines its test sessions. It creates no checkout or reservation.
+
+Demo role tokens expire after 24 hours. The retired shared demo token is rejected.
+See `backend/MANUFACT-HANDOFF.md` for the reconciled setup and remaining deployment steps.

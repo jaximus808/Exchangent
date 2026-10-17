@@ -10,6 +10,7 @@
     "test": "node --test test/*.test.mjs",
     "proof": "node --env-file=.env.local scripts/proof.mjs",
     "test:integration": "node --env-file=.env.local --test test/integration.mjs",
+    "test:auth-integration": "node --env-file=.env.local --test test/auth-integration.mjs",
     "seed:negotiation": "node --env-file-if-exists=.env.local scripts/seed-negotiation.mjs",
     "test:db": "sh test/sql/run.sh"
   },

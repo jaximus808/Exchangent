@@ -9,7 +9,8 @@ import { pgDb } from '../../scripts/pg-db.mjs';
 import { seed, seedId } from '../../scripts/seed-negotiation.mjs';
 import { Commerce } from '../../src/commerce.mjs';
 import { Negotiation } from '../../src/negotiation.mjs';
-import { createHandler } from '../../src/http.mjs';
+import { createApp } from '../../src/server.mjs';
+import { CommerceError } from '../../src/commerce.mjs';
 
 assert.ok(process.env.DATABASE_URL,'DATABASE_URL is required (use npm run test:db)');
 const db=pgDb(process.env.DATABASE_URL);
@@ -20,8 +21,8 @@ before(async()=>{
  P=await seed(db);
  [bay,mission,soma]=P.sellers;
  const commerce=new Commerce({db,stripe:{},webhookSecret:'whsec_unused',baseUrl:'http://127.0.0.1',integrationId:'test'});
- const negotiation=new Negotiation({db,demoToken:LEGACY,demoBuyerId:P.buyer.actor_id});
- server=createServer(createHandler({commerce,negotiation}));
+ const negotiation=new Negotiation({db});
+ server=createApp({commerce,negotiation,auth:{authenticate:async()=>{throw new CommerceError('unauthorized',401);}}});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
  base=`http://127.0.0.1:${server.address().port}`;
 });
@@ -126,8 +127,8 @@ test('full negotiation loop through HTTP on real Postgres',async t=>{
   const view=ok(await call('GET',`/sessions/${bs}`,buyer));
   assert.equal(view.role,'buyer');assert.ok(!has(view,'floor_cents'));assert.equal(view.history.length,1);
   err(await call('GET',`/buy-requests/${request.request_id}`,bay.token),'forbidden',403);
-  // Legacy COMMERCE_DEMO_TOKEN acts as the configured demo buyer.
-  assert.equal(ok(await call('GET',`/buy-requests/${request.request_id}`,LEGACY)).request_id,request.request_id);
+  // The retired shared demo token is never accepted by the production app.
+  err(await call('GET',`/buy-requests/${request.request_id}`,LEGACY),'unauthorized',401);
  });
 
  await t.test('buyer counter: over budget, stale, ok, idempotent, wrong turn',async()=>{
@@ -258,4 +259,11 @@ test('anon and authenticated roles cannot touch new tables or functions',async()
  for(const f of fns) assert.deepEqual([f.anon,f.auth,f.admin],[false,false,true],f.f);
  const rls=await sql(`SELECT relname FROM pg_class WHERE relname IN ('commerce_sessions','commerce_counters','commerce_principals') AND relrowsecurity`);
  assert.equal(rls.length,3);
+});
+
+test('demo role tokens expire and can be revoked',async()=>{
+ await sql("UPDATE commerce_principals SET expires_at=now()-interval '1 second' WHERE token_hash=$1",[ (await import('../../src/negotiation.mjs')).hashToken(P.buyer.token)]);
+ err(await call('GET','/me',P.buyer.token),'unauthorized',401);
+ await sql('UPDATE commerce_principals SET revoked_at=now() WHERE token_hash=$1',[(await import('../../src/negotiation.mjs')).hashToken(P.worker.token)]);
+ err(await call('GET','/worker/events',P.worker.token),'unauthorized',401);
 });
