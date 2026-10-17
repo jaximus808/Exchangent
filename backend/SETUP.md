@@ -68,6 +68,21 @@ The loopback server's buyer principal is configured by `DEMO_BUYER_ID`; its rand
 `COMMERCE_DEMO_TOKEN` is required as a Bearer credential. The proof CLI calls the
 same commerce module directly. Do not expose this single-buyer demo API publicly.
 
+## Negotiation loop
+
+Spec: `doc/negotiation-contract.md`. Schema and RPCs: `migrations/20261017230000_negotiation.sql`
+(additive; apply after the checkout foundation). Routes live in `src/http.mjs`, rules and
+redaction in `src/negotiation.mjs`. Bearer tokens resolve through `commerce_principals`
+(sha256 only); the legacy `COMMERCE_DEMO_TOKEN` still means `DEMO_BUYER_ID`.
+
+```sh
+npm run seed:negotiation --prefix backend   # writes backend/.demo-principals.json (gitignored)
+npm run test:db --prefix backend            # throwaway Docker postgres:16, both migrations, HTTP loop
+```
+
+The seed reuses `DEMO_BUYER_ID` as the buyer when set, resets demo stock and prices, and
+rotates every seed token on each run. `test:db` never touches InsForge.
+
 ## Remaining integration work
 
 - Port the handlers to the agreed Next.js layout and replace demo authentication
