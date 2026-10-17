@@ -1,18 +1,27 @@
-import { CommerceError } from './commerce.mjs';
-import { errorBody, fail, id } from './negotiation.mjs';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { CommerceError } from './commerce.ts';
+import type { Commerce } from './commerce.ts';
+import { errorBody, fail, id } from './negotiation.ts';
+import type { Negotiation } from './negotiation.ts';
+import type { RolePrincipal, RoleScope } from './types.ts';
 
-async function body(req) {
- const chunks=[]; let bytes=0;
- for await(const c of req) {bytes+=c.length;if(bytes>262144) throw new CommerceError('body_too_large',413);chunks.push(c);}
+async function body(req: IncomingMessage) {
+ const chunks: Buffer[]=[]; let bytes=0;
+ for await(const c of req as AsyncIterable<Buffer>) {bytes+=c.length;if(bytes>262144) throw new CommerceError('body_too_large',413);chunks.push(c);}
  return Buffer.concat(chunks);
 }
-async function json(req) {
+async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
  const raw=(await body(req)).toString('utf8');
  if(!raw.trim()) return {};
- try {const input=JSON.parse(raw);if(!input||typeof input!=='object'||Array.isArray(input)) throw new Error();return input;} catch {throw fail('invalid_input','Body must be valid JSON');}
+ try {const input: unknown=JSON.parse(raw);if(!input||typeof input!=='object'||Array.isArray(input)) throw new Error();return input as Record<string, unknown>;} catch {throw fail('invalid_input','Body must be valid JSON');}
 }
+interface RouteContext {
+ req: IncomingMessage; url: URL; m: RegExpMatchArray; p: RolePrincipal;
+ key: string | string[] | undefined; n: Negotiation; commerce: Commerce;
+}
+type Route=[method: string, pattern: RegExp, scope: RoleScope | null, handler: (c: RouteContext)=>unknown];
 // [method, pattern, scopes, handler(ctx)]. Scopes are re-checked inside Negotiation methods.
-const routes=[
+const routes: Route[]=[
  ['GET',/^\/api\/v1\/me$/,null,c=>c.n.whoami(c.p)],
  ['POST',/^\/api\/v1\/buy-requests$/,null,async c=>c.n.createRequest(c.p,c.key,await json(c.req))],
  ['GET',/^\/api\/v1\/buy-requests\/([^/]+)$/,null,c=>c.n.getRequest(c.p,c.m[1])],
@@ -31,12 +40,12 @@ const routes=[
  ['POST',/^\/api\/v1\/reservations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/checkout$/i,'buyer',c=>c.commerce.checkout(c.p.actor_id,id(c.m[1]))],
  ['GET',/^\/api\/v1\/reservations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i,'buyer',c=>c.commerce.status(c.p.actor_id,id(c.m[1]))],
 ];
-export function createHandler({commerce,negotiation}) {
- return async(req,res)=>{
+export function createHandler({commerce,negotiation}: {commerce: Commerce; negotiation: Negotiation}) {
+ return async(req: IncomingMessage,res: ServerResponse)=>{
   res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
-  const send=(code,data)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
+  const send=(code: number,data: unknown)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
   try {
-   const url=new URL(req.url,'http://127.0.0.1'),path=url.pathname;
+   const url=new URL(req.url as string,'http://127.0.0.1'),path=url.pathname;
    if(req.method==='GET'&&path==='/health') return send(200,{status:'ok',mode:'test'});
    if(req.method==='GET'&&['/success','/cancel'].includes(path))
      return send(200,{message:'Payment status is confirmed only by the verified Stripe webhook. Return to the assistant to check your order.'});

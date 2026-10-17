@@ -1,17 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { fromEnv } from '../src/commerce.mjs';
+import { fromEnv } from '../src/commerce.ts';
+import type { Row } from '../src/types.ts';
 const commerce=fromEnv(); const db=commerce.db;
 const local=new URL('../.local/',import.meta.url); await mkdir(local,{recursive:true});
 const proofFile=new URL('proof.json',local);
-async function insert(table,rows) {
+async function insert(table: string,rows: Row[]) {
  const {error}=await db.database.from(table).insert(rows);
  if(error) throw new Error(`Fixture ${table}: ${error.message}`);
 }
 if(process.argv.includes('--status')) {
- const proof=JSON.parse(await readFile(proofFile,'utf8'));
- const result=await commerce.status(process.env.DEMO_BUYER_ID,proof.reservation_id);
+ const proof: {reservation_id: string; session_id: string}=JSON.parse(await readFile(proofFile,'utf8'));
+ const result=await commerce.status(process.env.DEMO_BUYER_ID as string,proof.reservation_id);
  console.log(JSON.stringify(result,null,2));
  if(result.order) {
   const {data:events}=await db.database.from('commerce_payment_events').select('event_id,event_type').eq('session_id',proof.session_id).limit(10);
@@ -19,7 +20,7 @@ if(process.argv.includes('--status')) {
   console.log(JSON.stringify({verified_events:events,confirmation_outbox:outbox},null,2));
  }
 } else {
- const buyer=process.env.DEMO_BUYER_ID;
+ const buyer=process.env.DEMO_BUYER_ID as string;
  const {data:actors}=await db.database.from('commerce_actors').select('id').eq('id',buyer).limit(1);
  if(!actors?.length) await insert('commerce_actors',[{id:buyer,label:'Sandbox demo buyer',is_demo:true}]);
  const owner=randomUUID(),seller=randomUUID(),request=randomUUID(),offer=randomUUID();

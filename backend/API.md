@@ -2,7 +2,7 @@
 
 The dashboard and Manufact MCP server call the same backend operations. No root
 Next.js scaffold has been created, so the teammate's app layout remains separate.
-The modules are reusable from Next.js handlers; `server.mjs` is the local harness.
+The modules are reusable from Next.js handlers; `src/server.ts` is the local harness.
 
 ## Authentication
 

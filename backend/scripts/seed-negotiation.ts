@@ -7,16 +7,22 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { hashToken } from '../src/negotiation.mjs';
+import { hashToken } from '../src/negotiation.ts';
+import type { Db, DbResult } from '../src/types.ts';
 
-export function seedId(name) {
+export function seedId(name: string) {
  const h=createHash('sha256').update(`exchangent-seed:${name}`).digest('hex');
  return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-${(8|parseInt(h[16],16)&3).toString(16)}${h.slice(17,20)}-${h.slice(20,32)}`;
 }
+export interface SeedItem {
+ sku: string; title: string; category: 'desk' | 'chair'; attributes: Record<string, number | boolean>;
+ list_cents: number; floor_cents: number; available: number;
+}
+export interface SeedSeller { slug: string; name: string; delivery_cents: number; delivery_days: number; items: SeedItem[] }
 // $400 desk + ergonomic chair (desk <= 48in): every list-price bundle is over $400.
 // Bay Desk Co reaches it only by negotiating toward its floors (floors + delivery = $345).
 // Mission Ergonomics cannot (floors = $425). SoMa only stocks desks wider than 48in.
-export const SELLERS=[
+export const SELLERS: SeedSeller[]=[
  {slug:'bay-desk-co',name:'Bay Desk Co',delivery_cents:2500,delivery_days:1,items:[
   {sku:'BAY-DESK-46',title:'Bay 46in Walnut Desk',category:'desk',attributes:{width_in:46,adjustable:false},list_cents:26000,floor_cents:19000,available:3},
   {sku:'BAY-DESK-60',title:'Bay 60in Executive Desk',category:'desk',attributes:{width_in:60,adjustable:false},list_cents:42000,floor_cents:33000,available:2},
@@ -34,8 +40,15 @@ export const SELLERS=[
  ]},
 ];
 
-export async function seed(db,{buyerId=seedId('buyer'),baseUrl='http://127.0.0.1:8787'}={}) {
- const check=async(label,promise)=>{const {error}=await promise;if(error) throw new Error(`Seed ${label}: ${error.message}`);};
+/** Shape of backend/.demo-principals.json. */
+export interface DemoPrincipals {
+ backend_url: string;
+ buyer: { actor_id: string; token: string };
+ sellers: { seller_id: string; name: string; token: string }[];
+ worker: { token: string };
+}
+export async function seed(db: Db,{buyerId=seedId('buyer'),baseUrl='http://127.0.0.1:8787'}: {buyerId?: string; baseUrl?: string}={}): Promise<DemoPrincipals> {
+ const check=async(label: string,promise: PromiseLike<DbResult>)=>{const {error}=await promise;if(error) throw new Error(`Seed ${label}: ${error.message}`);};
  const t=db.database;
  const workerId=seedId('worker');
  await check('actors',t.from('commerce_actors').upsert([
@@ -63,12 +76,13 @@ export async function seed(db,{buyerId=seedId('buyer'),baseUrl='http://127.0.0.1
 }
 
 if(import.meta.url===pathToFileURL(process.argv[1]).href) {
- let db;
- if(process.env.DATABASE_URL) db=(await import('./pg-db.mjs')).pgDb(process.env.DATABASE_URL);
+ let db: Db & {end?: ()=>Promise<void>};
+ if(process.env.DATABASE_URL) db=(await import('./pg-db.ts')).pgDb(process.env.DATABASE_URL);
  else {
   if(!process.env.INSFORGE_URL||!process.env.INSFORGE_API_KEY) throw new Error('Set INSFORGE_URL and INSFORGE_API_KEY (backend/.env.local) or DATABASE_URL');
   const {createAdminClient}=await import('@insforge/sdk');
-  db=createAdminClient({baseUrl:process.env.INSFORGE_URL,apiKey:process.env.INSFORGE_API_KEY});
+  const {asDb}=await import('../src/commerce.ts');
+  db=asDb(createAdminClient({baseUrl:process.env.INSFORGE_URL,apiKey:process.env.INSFORGE_API_KEY}));
  }
  // Reuse the legacy demo buyer so COMMERCE_DEMO_TOKEN and the seeded buyer token act as the same buyer.
  const principals=await seed(db,{buyerId:process.env.DEMO_BUYER_ID||undefined,baseUrl:process.env.COMMERCE_BASE_URL||undefined});

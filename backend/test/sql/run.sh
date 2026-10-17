@@ -15,4 +15,4 @@ for f in test/sql/stubs.sql ../migrations/*.sql; do
  echo "apply $f"
  $DOCKER exec -i "$NAME" psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres < "$f"
 done
-DATABASE_URL="postgres://postgres:test@127.0.0.1:$PORT/postgres" node --test test/sql/*.db.mjs
+DATABASE_URL="postgres://postgres:test@127.0.0.1:$PORT/postgres" node --test test/sql/*.db.ts

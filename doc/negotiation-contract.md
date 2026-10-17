@@ -190,7 +190,7 @@ results, not thrown exceptions, and use the same `next` hint.
 - **Credentials** come from `agents/.env.local`, plus the demo tokens file the seed script writes. Nothing is
   committed.
 
-## Demo seed (`backend/scripts/seed-negotiation.mjs`)
+## Demo seed (`backend/scripts/seed-negotiation.ts`)
 
 Creates one buyer and three sellers in San Francisco, each with desks and chairs: list price, floor, width and
 stock. It also creates one bearer token per buyer, per seller and for the worker, and writes them to

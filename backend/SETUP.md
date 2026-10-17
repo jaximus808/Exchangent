@@ -35,12 +35,14 @@ the InsForge managed-payments module is not the selected integration path.
 
 ## Run the milestone locally
 
-Use Node 22 or later. Dependencies and private `backend/.env.local` are configured
-on this machine. Another machine must link the project and set its own secrets;
-`backend/.env.example` lists names only.
+Use Node 22.18 or later: the backend is TypeScript and Node runs the `.ts` sources
+directly (type stripping), so local use needs no build step. Dependencies and private
+`backend/.env.local` are configured on this machine. Another machine must link the
+project and set its own secrets; `backend/.env.example` lists names only.
 
 ```sh
 npm ci --prefix backend
+npm run typecheck --prefix backend
 npm test --prefix backend
 stripe listen --forward-to http://127.0.0.1:8787/webhooks/stripe --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired
 ```
@@ -79,9 +81,9 @@ They do not claim to test a complete human OAuth/email verification flow.
 ## Negotiation loop
 
 Spec: `doc/negotiation-contract.md`. Schema and RPCs: `migrations/20261017230000_negotiation.sql`
-(apply after the checkout and authenticated-commerce migrations). Routes live in `src/http.mjs`, rules and
-redaction in `src/negotiation.mjs`. Bearer tokens resolve through `commerce_principals`
-(sha256 only). Seed tokens expire after 24 hours and support `revoked_at`;
+(apply after the checkout and authenticated-commerce migrations). Routes live in `src/http.ts`, rules and
+redaction in `src/negotiation.ts`, shared row, RPC and principal types in `src/types.ts`.
+Bearer tokens resolve through `commerce_principals` (sha256 only). Seed tokens expire after 24 hours and support `revoked_at`;
 the retired `COMMERCE_DEMO_TOKEN` is not accepted by the running server.
 The server dispatches 64-character hex demo tokens to these role-based routes;
 verified user sessions and `exg_` task delegations retain the scoped API in `API.md`.
@@ -120,12 +122,16 @@ balances and do not make live charges to test the application.
 
 ## Deploy on Vercel
 
-`backend/api/index.mjs` serves the same app as `npm start` (`createApp` in
-`src/server.mjs`, including scoped authentication) as one Vercel function;
+`backend/api/index.ts` serves the same app as `npm start` (`createApp` in
+`src/server.ts`, including scoped authentication) as one Vercel function;
 `backend/vercel.json` rewrites every path to it. A public deployment is still a
 test-mode API: review it with the backend owner before sharing the URL.
 
 - Vercel project: Root Directory `backend`, Framework Preset `Other`, branch `manufact`.
+- Build: `backend/vercel.json` sets `"buildCommand": "npm run build"`, which compiles
+  `src/` to `dist/` (`tsconfig.build.json`). `api/index.ts` imports the compiled
+  `../dist/*.js`, because Vercel compiles the function file itself but is not relied on
+  to resolve `.ts` imports from `../src`. `dist/` is gitignored; do not commit it.
 - Environment variables (test keys only): `INSFORGE_URL`, `INSFORGE_API_KEY`,
   `INSFORGE_ANON_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_INTEGRATION_ID`,
   `COMMERCE_BASE_URL=https://<app>.vercel.app`, and `NODEJS_HELPERS=0` so the Stripe

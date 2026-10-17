@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Stripe from 'stripe';
-import { Commerce, assertTestKey, validateSession } from '../src/commerce.mjs';
+import { Commerce, assertTestKey, validateSession } from '../src/commerce.ts';
+import type { Db } from '../src/types.ts';
+// Test doubles implement only what each case touches.
+const stub=<T,>(value: unknown)=>value as T;
 const reservation={id:'reservation-1',stripe_session_id:'cs_test_1',total_cents:36500,currency:'usd'};
 const session={id:'cs_test_1',livemode:false,mode:'payment',metadata:{reservation_id:'reservation-1'},
  client_reference_id:'reservation-1',amount_total:36500,currency:'usd',payment_status:'paid',status:'complete'};
@@ -14,17 +17,18 @@ test('live keys, modes, price and identity mismatches are rejected',()=>{
 });
 const secret='whsec_unit_test_only';
 const stripe=new Stripe('sk_test_fixture');
+type Call={name: string; args: Record<string, unknown>};
 function setup(state=session) {
- const calls=[];
- const c=new Commerce({stripe:{webhooks:stripe.webhooks,checkout:{sessions:{retrieve:async()=>state}}},
-  webhookSecret:secret,db:{},baseUrl:'http://localhost',integrationId:'test'});
- c.row=async()=>reservation;c.rpc=async(name,args)=>{calls.push({name,args});return {confirmed:args.p_paid};};
+ const calls: Call[]=[];
+ const c=new Commerce({stripe:stub<Stripe>({webhooks:stripe.webhooks,checkout:{sessions:{retrieve:async()=>state}}}),
+  webhookSecret:secret,db:stub<Db>({}),baseUrl:'http://localhost',integrationId:'test'});
+ c.row=async<T,>()=>reservation as T;c.rpc=async<T,>(name: string,args: Record<string, unknown>)=>{calls.push({name,args});return {confirmed:args.p_paid} as T;};
  return {c,calls};
 }
 function event(type='checkout.session.completed') {
  return JSON.stringify({id:'evt_test_1',livemode:false,type,data:{object:{id:session.id}}});
 }
-function signed(raw){return stripe.webhooks.generateTestHeaderString({payload:raw,secret});}
+function signed(raw: string){return stripe.webhooks.generateTestHeaderString({payload:raw,secret});}
 test('invalid webhook signatures cannot mutate the database',async()=>{
  const {c,calls}=setup();await assert.rejects(c.webhook(event(),'invalid'),/invalid_signature/);assert.equal(calls.length,0);
 });

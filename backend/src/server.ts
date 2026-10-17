@@ -1,37 +1,41 @@
 import { createServer } from 'node:http';
+import type { IncomingMessage } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { CommerceError, fromEnv } from './commerce.mjs';
-import { authFromEnv } from './auth.mjs';
-import { Activity } from './activity.mjs';
-import { Negotiation } from './negotiation.mjs';
-import { createHandler } from './http.mjs';
+import { CommerceError, fromEnv } from './commerce.ts';
+import type { Commerce } from './commerce.ts';
+import { authFromEnv } from './auth.ts';
+import type { Auth } from './auth.ts';
+import { Activity } from './activity.ts';
+import { Negotiation } from './negotiation.ts';
+import { createHandler } from './http.ts';
 
-async function body(req) {
-  const chunks=[];let bytes=0;
-  for await(const chunk of req) {
+async function body(req: IncomingMessage) {
+  const chunks: Buffer[]=[];let bytes=0;
+  for await(const chunk of req as AsyncIterable<Buffer>) {
     bytes+=chunk.length;
     if(bytes>262144) throw new CommerceError('body_too_large',413);
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
 }
-async function json(req) {
+async function json(req: IncomingMessage): Promise<Record<string, unknown>> {
   try {
-    const input=JSON.parse((await body(req)).toString());
+    const input: unknown=JSON.parse((await body(req)).toString());
     if(!input || typeof input!=='object' || Array.isArray(input)) throw new Error();
-    return input;
+    return input as Record<string, unknown>;
   } catch(error) {
     if(error instanceof CommerceError) throw error;
     throw new CommerceError('invalid_json',400);
   }
 }
-export function createApp({commerce,auth,activity=new Activity(commerce),negotiation=new Negotiation({db:commerce.db})}) {
+export interface AppOptions { commerce: Commerce; auth: Auth; activity?: Activity; negotiation?: Negotiation }
+export function createApp({commerce,auth,activity=new Activity(commerce),negotiation=new Negotiation({db:commerce.db})}: AppOptions) {
   const negotiationHandler=createHandler({commerce,negotiation});
   return createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
-    const send=(code,data)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
+    const send=(code: number,data: unknown)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
     try {
-      const path=new URL(req.url,'http://127.0.0.1').pathname;
+      const path=new URL(req.url as string,'http://127.0.0.1').pathname;
       if(req.method==='GET'&&path==='/health') return send(200,{status:'ok',mode:'test'});
       if(req.method==='GET'&&['/success','/cancel'].includes(path))
         return send(200,{message:'Payment status is confirmed only by the verified Stripe webhook. Return to the assistant to check your order.'});
