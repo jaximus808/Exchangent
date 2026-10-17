@@ -150,7 +150,7 @@ export function errorNext(code: string, nextAction: string | undefined, hint: Hi
       return "The Exchangent backend could not be reached; retry the same call shortly (it is safe — the idempotency key is unchanged).";
     default:
       return nextAction
-        ? `The backend suggests: ${nextAction}. Re-read current state with ${hint.reread} before trying again.`
+        ? `The backend suggests: ${nextAction.replace(/\.+$/, "")}. Re-read current state with ${hint.reread} before trying again.`
         : `The call failed; re-read current state with ${hint.reread} before trying again.`;
   }
 }
