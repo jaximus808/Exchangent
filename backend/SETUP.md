@@ -101,3 +101,17 @@ rotates every seed token on each run. `test:db` never touches InsForge.
 The team has reported a $500 Stripe hackathon credit grant. Redemption and eligible
 uses have not been checked. Keep the credit grant separate from test payment
 balances and do not make live charges to test the application.
+
+## Deploy on Vercel
+
+`backend/api/index.mjs` serves the same handler as `src/server.mjs` as one Vercel
+function; `backend/vercel.json` rewrites every path to it.
+
+- Vercel project: Root Directory `backend`, Framework Preset `Other`, branch `manufact`.
+- Environment variables (test keys only): `INSFORGE_URL`, `INSFORGE_API_KEY`,
+  `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_INTEGRATION_ID`,
+  `COMMERCE_DEMO_TOKEN`, `DEMO_BUYER_ID`, `COMMERCE_BASE_URL=https://<app>.vercel.app`,
+  and `NODEJS_HELPERS=0` so the Stripe webhook receives the raw body.
+- Stripe: add a sandbox webhook endpoint `https://<app>.vercel.app/webhooks/stripe`
+  for the four checkout events and use its signing secret as `STRIPE_WEBHOOK_SECRET`.
+- Check: `curl https://<app>.vercel.app/health` returns `{"status":"ok","mode":"test"}`.
