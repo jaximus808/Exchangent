@@ -1,8 +1,12 @@
 /**
  * Thin HTTP adapter between MCP tool calls and the Exchangent backend.
  *
- * - Forwards the MCP caller's `Authorization: Bearer ...` header (falls back to
- *   `EXCHANGENT_TOKEN` only when the MCP request carried no header).
+ * - Bearer mode (default): forwards the MCP caller's `Authorization: Bearer ...`
+ *   header (falls back to `EXCHANGENT_TOKEN` only when the MCP request carried no header).
+ * - OAuth mode (`EXCHANGENT_AUTH=oauth`): forwards the signed-in user's Exchangent
+ *   connector token (`exc_…`) held by the mcp-use OAuth proxy (`upstreamToken(ctx.auth)`).
+ *   The MCP request's own `Authorization` header (the proxy's `mcp_at_…` token)
+ *   and `EXCHANGENT_TOKEN` are never used.
  * - Sends a deterministic `Idempotency-Key` on every mutation.
  * - Maps the backend envelope (`{ data }` / `{ error: { code, message, next_action } }`)
  *   into `{ status: "ok" | "error", ...data, next }` tool results. Errors are
@@ -14,6 +18,8 @@
  */
 import { createHash } from "node:crypto";
 import type { CallToolResult } from "mcp-use";
+import { upstreamToken } from "mcp-use/oauth";
+import { authMode } from "./auth.ts";
 
 export const DEFAULT_API_URL = "http://127.0.0.1:8787/api/v1";
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -27,14 +33,29 @@ export function apiBaseUrl(): string {
 export interface CallContext {
   signal?: AbortSignal;
   request?: { header(name: string): string | undefined };
+  /** Verified OAuth identity (oauth mode only); `upstream` holds the Exchangent connector token (`exc_…`). */
+  auth?: { upstream?: { accessToken: string; scopes: string[]; expiresAt?: number }; user?: unknown };
 }
 
 /**
  * Resolve the bearer credential for this tool call.
+ *
+ * OAuth mode: the Exchangent connector token the proxy stored for the signed-in
+ * user. Nothing else is ever forwarded.
+ *
+ * Bearer mode:
  * 1. The incoming MCP HTTP request's `Authorization: Bearer <token>` header.
  * 2. `EXCHANGENT_TOKEN` env, only when the MCP request had no Authorization header.
  */
 export function resolveAuthorization(ctx: CallContext): string | undefined {
+  if (authMode() === "oauth") {
+    if (!ctx.auth?.upstream) return undefined;
+    try {
+      return `Bearer ${upstreamToken(ctx.auth)}`;
+    } catch {
+      return undefined;
+    }
+  }
   const incoming = ctx.request?.header("authorization")?.trim();
   if (incoming) return /^bearer\s+\S+/i.test(incoming) ? incoming : undefined;
   const fallback = process.env.EXCHANGENT_TOKEN?.trim();
@@ -131,8 +152,14 @@ export function errorNext(code: string, nextAction: string | undefined, hint: Hi
     case "session_closed":
       return "This negotiation session is closed or declined; stop acting on it and use your other open sessions instead.";
     case "unauthorized":
+      if (authMode() === "oauth") {
+        return "Exchangent rejected this connection's sign-in (it expired or was revoked); stop and ask the human to reconnect the Exchangent connector and sign in again (Claude Code: run /mcp, select exchangent, choose re-authenticate), then retry.";
+      }
       return "No valid bearer token reached the backend; ask the human to reconnect this MCP server with an `Authorization: Bearer <token>` header (or set EXCHANGENT_TOKEN for local dev).";
     case "forbidden":
+      if (authMode() === "oauth") {
+        return "This connection is authorized for a different account or role than this action needs; call whoami to see which buyer account or business it acts for. To switch, the human must reconnect the Exchangent connector and pick the other account on the consent screen.";
+      }
       return "Your token is not allowed to act on this resource; use only your own requests or sessions and the tools for your role (buyer or seller).";
     case "offer_expired":
       return "That offer has expired; call list_offers to see current offers, or counter_offer on the session to ask for a fresh one.";
@@ -142,6 +169,8 @@ export function errorNext(code: string, nextAction: string | undefined, hint: Hi
       return "That idempotency key was already used for a different request; if you really intend a new action, retry with a new idempotency_key.";
     case "payment_pending":
       return "Payment is still processing; call get_reservation_status again in a little while.";
+    case "price_changed":
+      return "The saved total differs from the approved amount. Re-read the offers and ask the human to approve the current total before retrying.";
     case "invalid_input":
       return "The backend rejected the inputs; fix them according to the error message and retry once.";
     case "not_found":
@@ -176,7 +205,10 @@ export type BackendResult =
 export async function callBackend(ctx: CallContext, call: BackendCall): Promise<BackendResult> {
   const authorization = resolveAuthorization(ctx);
   if (!authorization) {
-    return { ok: false, httpStatus: 401, code: "unauthorized", message: "No bearer token: the MCP request had no Authorization header and EXCHANGENT_TOKEN is not set." };
+    const message = authMode() === "oauth"
+      ? "This MCP connection has no Exchangent sign-in."
+      : "No bearer token: the MCP request had no Authorization header and EXCHANGENT_TOKEN is not set.";
+    return { ok: false, httpStatus: 401, code: "unauthorized", message };
   }
   const url = new URL(apiBaseUrl() + call.path);
   for (const [k, v] of Object.entries(call.query ?? {})) if (v !== undefined) url.searchParams.set(k, v);

@@ -1,0 +1,14 @@
+{
+  // Emits dist/ for the Vercel function (api/index.ts imports ../dist/*.js).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": true,
+    "declaration": true,
+    "rootDir": "src",
+    "rootDirs": ["src"],
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}

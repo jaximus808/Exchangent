@@ -3,15 +3,19 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "scripts": {
-    "start": "node --env-file=.env.local src/server.mjs",
-    "test": "node --test test/*.test.mjs",
-    "proof": "node --env-file=.env.local scripts/proof.mjs",
-    "test:integration": "node --env-file=.env.local --test test/integration.mjs",
-    "test:auth-integration": "node --env-file=.env.local --test test/auth-integration.mjs",
-    "seed:negotiation": "node --env-file-if-exists=.env.local scripts/seed-negotiation.mjs",
+    "start": "node --env-file=.env.local src/server.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "proof": "node --env-file=.env.local scripts/proof.ts",
+    "test:integration": "node --env-file=.env.local --test test/integration.ts",
+    "test:auth-integration": "node --env-file=.env.local --test test/auth-integration.ts",
+    "seed:negotiation": "node --env-file-if-exists=.env.local scripts/seed-negotiation.ts",
+    "oauth:client": "node --env-file-if-exists=.env.local scripts/oauth-client.ts",
+    "assign:seller": "node --env-file-if-exists=.env.local scripts/assign-seller.ts",
     "test:db": "sh test/sql/run.sh"
   },
   "dependencies": {
@@ -19,6 +23,9 @@
     "stripe": "23.0.0"
   },
   "devDependencies": {
-    "pg": "8.16.3"
+    "@types/node": "22.20.5",
+    "@types/pg": "8.15.6",
+    "pg": "8.16.3",
+    "typescript": "7.0.2"
   }
 }

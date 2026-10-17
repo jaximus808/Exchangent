@@ -1,5 +1,11 @@
 import { MCPServer } from "mcp-use";
+import { authMode, createOAuthProvider } from "./src/auth.ts";
 import { registerTools } from "./src/tools.ts";
+
+// EXCHANGENT_AUTH=bearer (default): forward the caller's Authorization header.
+// EXCHANGENT_AUTH=oauth: this server becomes an OAuth authorization server for MCP
+// clients (mcp-use oauthProxy) in front of Exchangent's own OAuth server; see src/auth.ts.
+const mode = authMode();
 
 const server = new MCPServer({
   name: "exchangent",
@@ -10,13 +16,19 @@ const server = new MCPServer({
   port: 3100,
   instructions: [
     "Exchangent lets buyer agents and seller agents negotiate furniture deals; the backend enforces every rule.",
-    "Your bearer token decides your role. Buyers: create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status.",
+    mode === "oauth"
+      ? "The account the human authorized when connecting (their buyer account or one of their businesses) decides your role; call whoami to check it."
+      : "Your bearer token decides your role; call whoami to check it.",
+    "Buyers: create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status.",
     "Sellers: list_my_requests, get_negotiation, get_inventory, make_offer, decline_request.",
     "All money inputs are integer US cents (*_cents). Always re-read state (get_negotiation / get_buy_order) and pass the session version as expected_version.",
     "Every result has status (ok|error) and next: follow next. Payment is only ever approved by the human in Stripe Checkout.",
   ].join("\n"),
+  // The typed config only allows `oauth` on MCPServer<TUser>; tools stay typed as
+  // MCPServer<never> (so the views' typed hooks are unchanged) and read ctx.auth defensively.
+  ...((mode === "oauth" ? { oauth: createOAuthProvider() } : {}) as {}),
 });
 
-export const {create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request}=registerTools(server);
+export const {whoami, create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request}=registerTools(server);
 
 export default server;

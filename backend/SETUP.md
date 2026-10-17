@@ -35,12 +35,14 @@ the InsForge managed-payments module is not the selected integration path.
 
 ## Run the milestone locally
 
-Use Node 22 or later. Dependencies and private `backend/.env.local` are configured
-on this machine. Another machine must link the project and set its own secrets;
-`backend/.env.example` lists names only.
+Use Node 22.18 or later: the backend is TypeScript and Node runs the `.ts` sources
+directly (type stripping), so local use needs no build step. Dependencies and private
+`backend/.env.local` are configured on this machine. Another machine must link the
+project and set its own secrets; `backend/.env.example` lists names only.
 
 ```sh
 npm ci --prefix backend
+npm run typecheck --prefix backend
 npm test --prefix backend
 stripe listen --forward-to http://127.0.0.1:8787/webhooks/stripe --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired
 ```
@@ -79,14 +81,15 @@ They do not claim to test a complete human OAuth/email verification flow.
 ## Negotiation loop
 
 Spec: `doc/negotiation-contract.md`. Schema and RPCs: `migrations/20261017230000_negotiation.sql`
-(apply after the checkout and authenticated-commerce migrations). Routes live in `src/http.mjs`, rules and
-redaction in `src/negotiation.mjs`. Bearer tokens resolve through `commerce_principals`
-(sha256 only). Seed tokens expire after 24 hours and support `revoked_at`;
+(apply after the checkout and authenticated-commerce migrations). Routes live in `src/http.ts`, rules and
+redaction in `src/negotiation.ts`, shared row, RPC and principal types in `src/types.ts`.
+Bearer tokens resolve through `commerce_principals` (sha256 only). Seed tokens expire after 24 hours and support `revoked_at`;
 the retired `COMMERCE_DEMO_TOKEN` is not accepted by the running server.
 The server dispatches 64-character hex demo tokens to these role-based routes;
 verified user sessions and `exg_` task delegations retain the scoped API in `API.md`.
 Negotiation tools currently require the seeded role token, not a user session or
-scoped delegation. Full account-linked MCP authentication remains pending.
+scoped delegation. Connector access tokens (`exc_`) from the OAuth flow below also
+use these routes, as the buyer or one owned business.
 
 ```sh
 npm run seed:negotiation --prefix backend   # writes backend/.demo-principals.json (gitignored)
@@ -96,6 +99,40 @@ npm run test:db --prefix backend            # throwaway Docker postgres:16, all 
 The seed reuses `DEMO_BUYER_ID` as the buyer when set, resets demo stock and prices, and
 rotates every seed token on each run. `test:db` never touches InsForge.
 
+## Connector OAuth (ChatGPT and Claude)
+
+Spec: `doc/oauth-contract.md`. Routes and errors are listed in `API.md` under "Connector OAuth".
+To go live:
+
+1. Apply `migrations/20261018000200_connector-oauth.sql` to InsForge, after the payment-approval
+   migration. It adds three tables (RLS on, with no anon or authenticated access) and eight RPCs that only
+   `project_admin` can execute. One of them, `commerce_auth_user_by_email`, is `SECURITY DEFINER`
+   because it reads `auth.users.email`.
+2. Register the MCP server as the OAuth client. Its redirect URI must be exactly the proxy callback
+   `<MCP_URL>/mcp/oauth/callback`. The ID and secret come from `EXCHANGENT_OAUTH_CLIENT_ID` and
+   `EXCHANGENT_OAUTH_CLIENT_SECRET`, here read from the MCP env file. Without a secret, the script
+   generates one and prints it once. Only its SHA-256 digest is stored.
+
+   ```sh
+   npm run oauth:client --prefix backend -- --name "Exchangent MCP" \
+     --redirect-uri "<MCP_URL>/mcp/oauth/callback" --env-file ../mcp/.env.production.local
+   ```
+
+   Re-running updates the name and redirect URIs. A secret it isn't given stays unchanged, and
+   `--rotate-secret` issues a new one.
+3. Have the demo person sign in once on the web app at `/oauth/authorize` so that InsForge
+   has their account. Then make them the owner of a demo business:
+
+   ```sh
+   npm run assign:seller --prefix backend -- --email <person@example.com> --seller "Bay Desk Co"
+   ```
+
+Both scripts read `backend/.env.local` (`INSFORGE_URL`, `INSFORGE_API_KEY`). With `DATABASE_URL`
+set, they use a local Postgres instead. `npm run test:db` runs the whole flow against a
+throwaway container (`test/sql/oauth.db.ts`). That covers registration, consent, token exchange,
+connector buy and sell routes, refresh rotation, reuse revocation and every failure case. The test
+files run one at a time because they share the demo seed.
+
 ## Remaining integration work
 
 - Port the handlers to the agreed Next.js layout and connect the frontend's
@@ -103,8 +140,8 @@ rotates every seed token on each run. `test:db` never touches InsForge.
 - Connect the frontend request form and user sessions to the structured negotiation
   contract. The demo role API now creates matched sessions and negotiation events;
   the frontend text-brief API still queues `request.created` for later processing.
-- Agree MCP OAuth mapping with the teammate. A provider's token is not automatically
-  an InsForge user token; exchange through an authenticated account-link flow.
+- Connector OAuth is implemented, but the full browser flow through the deployed web consent
+  page and Manufact MCP proxy still needs a live acceptance run.
 - Add scheduled reconciliation: unpaid bound sessions release stock only after
   Stripe confirms expiry/failure. Never release based solely on a local timestamp.
   Unbound holds also need a safe cleanup path; ambiguous checkout creation retries
@@ -120,12 +157,16 @@ balances and do not make live charges to test the application.
 
 ## Deploy on Vercel
 
-`backend/api/index.mjs` serves the same app as `npm start` (`createApp` in
-`src/server.mjs`, including scoped authentication) as one Vercel function;
+`backend/api/index.ts` serves the same app as `npm start` (`createApp` in
+`src/server.ts`, including scoped authentication) as one Vercel function;
 `backend/vercel.json` rewrites every path to it. A public deployment is still a
 test-mode API: review it with the backend owner before sharing the URL.
 
 - Vercel project: Root Directory `backend`, Framework Preset `Other`, branch `manufact`.
+- Build: `backend/vercel.json` sets `"buildCommand": "npm run build"`, which compiles
+  `src/` to `dist/` (`tsconfig.build.json`). `api/index.ts` imports the compiled
+  `../dist/*.js`, because Vercel compiles the function file itself but is not relied on
+  to resolve `.ts` imports from `../src`. `dist/` is gitignored; do not commit it.
 - Environment variables (test keys only): `INSFORGE_URL`, `INSFORGE_API_KEY`,
   `INSFORGE_ANON_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_INTEGRATION_ID`,
   `COMMERCE_BASE_URL=https://<app>.vercel.app`, and `NODEJS_HELPERS=0` so the Stripe
