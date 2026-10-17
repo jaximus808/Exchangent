@@ -87,11 +87,33 @@ function route(method: string, path: string, body: any): Reply {
 export interface FakeBackend {
   url: string;
   requests: RecordedRequest[];
+  /** Make the backend answer 401 for this bearer token from now on (a revoked connector grant). */
+  revoke(token: string): void;
   close(): Promise<void>;
+}
+
+/**
+ * `GET /me` for the principal behind a bearer token (doc/oauth-contract.md).
+ * Connector tokens (`exc_…`) containing "seller" act for IDS.seller; other
+ * `exc_` tokens act for a buyer.
+ */
+function me(token: string): Reply {
+  if (token.startsWith("exc_")) {
+    const seller = token.includes("seller");
+    return ok({
+      kind: "connector",
+      scope: seller ? "seller" : "buyer",
+      actor_id: "a0000000-0000-4000-8000-00000000000a",
+      seller_id: seller ? IDS.seller : null,
+      client_id: "exchangent-mcp-test-client",
+    });
+  }
+  return ok({ actor_id: "a0000000-0000-4000-8000-0000000000de", kind: "buyer", scopes: null, request_id: null, seller_id: null });
 }
 
 export async function startFakeBackend(): Promise<FakeBackend> {
   const requests: RecordedRequest[] = [];
+  const revoked = new Set<string>();
   const server: Server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
@@ -106,7 +128,10 @@ export async function startFakeBackend(): Promise<FakeBackend> {
     requests.push({ method: req.method ?? "", path: url.pathname, query: Object.fromEntries(url.searchParams), headers: req.headers, body });
 
     let reply: Reply;
-    if (!/^Bearer \S+/.test(req.headers.authorization ?? "")) reply = fail(401, "unauthorized", "Missing bearer token.", "authenticate");
+    const token = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1];
+    if (!token) reply = fail(401, "unauthorized", "Missing bearer token.", "authenticate");
+    else if (revoked.has(token)) reply = fail(401, "unauthorized", "Token revoked or expired.", "authenticate");
+    else if (req.method === "GET" && url.pathname === "/api/v1/me") reply = me(token);
     else if (req.method === "POST" && !req.headers["idempotency-key"]) reply = fail(400, "invalid_input", "Idempotency-Key required.", "retry_with_key");
     else reply = route(req.method ?? "", url.pathname, body);
     res.writeHead(reply.status, { "Content-Type": "application/json" });
@@ -117,6 +142,7 @@ export async function startFakeBackend(): Promise<FakeBackend> {
   return {
     url: `http://127.0.0.1:${port}/api/v1`,
     requests,
+    revoke: (token) => void revoked.add(token),
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

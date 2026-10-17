@@ -22,6 +22,7 @@ const EXPECTED_TOOLS = [
   "get_inventory",
   "make_offer",
   "decline_request",
+  "whoami",
 ].sort();
 
 let backend: FakeBackend;
@@ -62,7 +63,7 @@ after(async () => {
 });
 
 describe("exchangent mcp server", () => {
-  test("lists exactly the contract tools, each with an input schema", async () => {
+  test("lists exactly the contract tools (plus whoami), each with an input schema", async () => {
     const client = await connect("buyer-token");
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((t) => t.name).sort(), EXPECTED_TOOLS);
@@ -211,6 +212,18 @@ describe("exchangent mcp server", () => {
     assert.equal(sc.error.code, "unauthorized");
     assert.match(sc.next, /Authorization: Bearer/);
     assert.equal(backend.requests.length, 0, "no backend call without a token");
+  });
+
+  test("whoami in bearer mode reports the mode and the backend's /me for the forwarded token", async () => {
+    const client = await connect("buyer-token");
+    backend.requests.length = 0;
+    const { result, sc } = await call(client, "whoami", {});
+    assert.notEqual(result.isError, true);
+    assert.equal(sc.auth_mode, "bearer");
+    assert.equal(sc.actor_id, "a0000000-0000-4000-8000-0000000000de");
+    assert.equal(backend.requests[0].path, "/api/v1/me");
+    assert.equal(backend.requests[0].headers.authorization, "Bearer buyer-token");
+    assert.ok(!JSON.stringify(result).includes("buyer-token"), "never echoes the token");
   });
 
   test("schema validation rejects dollars-as-floats for *_cents inputs", async () => {

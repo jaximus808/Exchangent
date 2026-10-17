@@ -6,7 +6,8 @@
  */
 import type { MCPServer } from "mcp-use";
 import { z } from "zod";
-import { deriveIdempotencyKey, runTool, type CallContext, type HintContext } from "./adapter.ts";
+import { callBackend, deriveIdempotencyKey, errorResult, okResult, runTool, shapeData, type CallContext, type HintContext } from "./adapter.ts";
+import { authMode, type ExchangentUser } from "./auth.ts";
 
 const id = (what: string) => z.string().min(1).describe(`The ${what} ID (UUID) returned by an earlier Exchangent tool.`);
 const cents = (what: string) =>
@@ -31,6 +32,11 @@ const resultSchema = z.looseObject({
 
 const BUYER: HintContext = { role: "buyer", reread: "get_buy_order" };
 const SELLER: HintContext = { role: "seller", reread: "get_negotiation" };
+const WHOAMI: HintContext = { role: "buyer", reread: "whoami" };
+
+const BUYER_NEXT = "This connection acts for a buyer: use create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link and get_reservation_status.";
+const sellerNext = (sellerId: unknown) =>
+  `This connection acts for business ${String(sellerId)}: use list_my_requests, get_negotiation, get_inventory, make_offer and decline_request.`;
 
 const seg = (value: string) => encodeURIComponent(value);
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
@@ -387,5 +393,54 @@ export function registerTools(server: MCPServer) {
       );
     },
   );
-  return {create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request};
+  // -------------------------------------------------------------------------
+  // Identity (both auth modes)
+  // -------------------------------------------------------------------------
+
+  const whoami=server.tool(
+    {
+      name: "whoami",
+      title: "Who am I",
+      description:
+        "Show which Exchangent account this MCP connection acts for: the auth mode (bearer or oauth) and the signed-in actor, principal kind, granted scope (buyer or seller) and, for a business, its seller_id. Call it first if you are unsure whether to use buyer or seller tools. Never returns tokens.",
+      inputSchema: z.object({}),
+      outputSchema: resultSchema,
+      annotations: readOnly,
+    },
+    async (_input, ctx) => {
+      const call = ctx as CallContext;
+      if (authMode() === "oauth") {
+        const user = call.auth?.user as ExchangentUser | undefined;
+        if (!user) {
+          return errorResult({ ok: false, httpStatus: 401, code: "unauthorized", message: "This MCP connection has no Exchangent sign-in." }, WHOAMI);
+        }
+        const expiresAt = call.auth?.upstream?.expiresAt;
+        return okResult(
+          {
+            auth_mode: "oauth",
+            signed_in: true,
+            actor_id: user.actor_id,
+            kind: user.kind,
+            acting_as: user.acting_as,
+            seller_id: user.seller_id,
+            scope: user.scope,
+            client_id: user.client_id,
+            ...(expiresAt ? { authorization_expires_at: new Date(expiresAt * 1000).toISOString() } : {}),
+          },
+          user.seller_id ? sellerNext(user.seller_id) : BUYER_NEXT,
+        );
+      }
+      const result = await callBackend(call, { method: "GET", path: "/me" });
+      if (!result.ok) {
+        const err = errorResult(result, WHOAMI);
+        err.structuredContent.auth_mode = "bearer";
+        err.content = [{ type: "text", text: JSON.stringify(err.structuredContent, null, 2) }];
+        return err;
+      }
+      const data = shapeData(result.data);
+      return okResult({ auth_mode: "bearer", ...data }, data.seller_id ? sellerNext(data.seller_id) : BUYER_NEXT);
+    },
+  );
+
+  return {whoami, create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request};
 }
