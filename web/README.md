@@ -6,7 +6,7 @@ and Claude send people to when they add the Exchangent connector.
 | Page | What it shows |
 |---|---|
 | `/` signed out | Landing: how it works, email-code sign-in (any email; a new one creates the account), how to connect Claude |
-| `/` signed in | Dashboard. **Overview** (live negotiations, deals, best offer, businesses), **Buying** (requests with best offer, seller count and agent on/off; per request the current offers with Reserve & pay → Stripe test checkout, the receipt once paid, and every agent message per seller), **Selling** (each business: inventory with list price and private minimum, add an item, agent on/off, live negotiations from the seller's side), **Connect** (MCP URL and Claude / Claude Code steps). Deep links: `/#buying`, `/#selling`, `/#connect` |
+| `/` signed in | Dashboard. **Overview** (live negotiations, deals, best offer, businesses), **Buying** (requests with best offer, seller count and agent on/off; per request the current offers with Reserve & pay → Stripe test checkout, the receipt once paid, and every agent message per seller), **Selling** (each business: inventory with list price and private minimum, add an item, agent on/off, live negotiations from the seller's side), **Connect** (MCP URL and Claude / Claude Code steps). **Orders** (Buying): each paid order's timeline (paid → shipped → delivered, with simulated scans labelled), "It arrived", **Report a problem** and every case with accept / counter / decline and refunds. **Selling** also lists orders to ship (Mark shipped; Simulate delivery in test mode), problem cases to answer, and a resolution-policy editor. Order sections stay hidden on a backend without the order routes. Deep links: `/#buying`, `/#selling`, `/#connect` |
 | `/watch/<request_id>` | Live, projector-friendly view of one request for its buyer: one column per seller, chat bubbles with price, note, who moved and the Inkbox A2A hop (from → to, message ID). Polls every 1.5 s while negotiating. Dark by default, light toggle, full-screen button |
 
 The commerce proxy (`app/api/commerce/[...path]`) only forwards the paths the pages use, with the signed-in
@@ -52,6 +52,7 @@ Files: `app/oauth/authorize/` (page, server actions, backend calls, client forms
 | Variable | Where | Value |
 |---|---|---|
 | `COMMERCE_API_URL` | server | `https://exchangent.vercel.app` in production (defaults to `http://127.0.0.1:8787`) |
+| `WEB_ORIGIN` | server | Optional, comma-separated origins allowed to write through `/api/commerce/*`, for example `https://web-five-jet-34.vercel.app`. When unset, only the request's own origin is accepted (plus its loopback aliases in local development). |
 | `NEXT_PUBLIC_INSFORGE_URL` | build + server | InsForge project URL |
 | `NEXT_PUBLIC_INSFORGE_ANON_KEY` | build + server | InsForge anon key |
 

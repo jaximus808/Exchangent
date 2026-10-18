@@ -17,7 +17,7 @@ type User={id:string;email:string};
 type View='Overview'|'Buying'|'Selling'|'Connect';
 const NAV=[{label:'Overview',icon:LayoutDashboard},{label:'Buying',icon:ShoppingBag},{label:'Selling',icon:Store},{label:'Connect',icon:Plug}] as const;
 const HEADINGS:Record<View,[string,string]>={
- Overview:['Your desk.','Your agent buys. Sellers’ agents sell. You approve every payment.'],
+ Overview:['Your workspace.','Your agent buys. Sellers’ agents sell. You approve every payment.'],
  Buying:['What you’re buying.','Every request, every offer and every message your agent traded for it.'],
  Selling:['What you’re selling.','Your businesses, your stock and your private minimums, and how your seller agent is negotiating.'],
  Connect:['Connect your assistant.','Exchangent lives inside Claude. Connect once, then buy or sell in plain language.'],
@@ -33,7 +33,7 @@ function Landing({configured}:{configured:boolean}) {
     <h1>Your agent buys.<br/>Their agent sells.<br/><span>You approve.</span></h1>
     <p>Tell Claude what you need. Your buying agent haggles with every seller’s agent over Inkbox, within rules Exchangent enforces, and emails you when it has a deal. You pay with Stripe only after you approve.</p>
     <ol className="landing-steps">
-     <li><span>1</span><div><strong>Ask in Claude</strong><small>“A desk under 48 inches and an ergonomic chair, $400 all-in.”</small></div></li>
+     <li><span>1</span><div><strong>Ask in Claude</strong><small>Say what you need, your budget and when you need it by.</small></div></li>
      <li><span>2</span><div><strong>Agents negotiate</strong><small>Buyer and seller agents trade offers. Floors and budgets stay private.</small></div></li>
      <li><span>3</span><div><strong>You approve</strong><small>Reserve the deal and pay in a Stripe test checkout.</small></div></li>
     </ol>

@@ -3,11 +3,11 @@ import { CommerceError } from './commerce.ts';
 import type {
  AgentHandle, ApiError, BusinessJson, Conversation, CreatedCounter, CreatedOffer, CreatedRequest, DbError, DeclinedSession, DelegatedBuyer, DelegatedBuyerEmail, ErrorCode, EventAck,
  InventoryItem, OfferJson, Requirements, RequestState, RoleScope, RolePrincipal, RpcDb, SellerSession, SessionJson,
- RegisteredBusiness, SellerAgentToken, SessionConversation, SessionState, WorkerEvent,
+ RegisteredBusiness, RoundLimited, SellerAgentToken, SessionConversation, SessionState, SweepResult, WorkerEvent,
 } from './types.ts';
 
 const STATUS: Partial<Record<ErrorCode,number>>={unauthorized:401,forbidden:403,not_found:404,session_not_found:404,request_not_found:404,
- event_not_found:404,seller_not_found:404,not_delegated:403,invalid_input:400,invalid_id:400,idempotency_key_required:400,
+ event_not_found:404,seller_not_found:404,not_delegated:403,too_many_requests:429,invalid_input:400,invalid_id:400,idempotency_key_required:400,
  body_too_large:413,database_error:503};
 export const statusFor=(code: ErrorCode)=>STATUS[code]??409;
 export function fail(code: ErrorCode,detail?: string) {
@@ -52,6 +52,9 @@ export const NEXT_ACTIONS: Partial<Record<ErrorCode,string>>={
  business_name_taken:'Another business already uses that name. Choose a different name.',
  business_limit:'This account already owns 5 businesses. Manage an existing one instead.',
  not_delegated:'The owner turned off agent negotiation for this business. Skip it; only the owner can act for it.',
+ round_limit:'This negotiation reached its round limit and is now closed. Buyers: reserve another current offer from list_offers or create a new request; sellers: stop.',
+ too_many_requests:'You have 5 open requests or created 20 in the last 24 hours. Finish or wait on an existing request (list_my_requests / get_buy_order) before creating another.',
+ request_expired:'This request passed its delivery deadline and expired. Create a new buy order with a later deliver_by date.',
  body_too_large:'Send a smaller JSON body.',
  database_error:'Temporary backend problem. Retry the same call with the same Idempotency-Key.',
 };
@@ -62,6 +65,8 @@ export const MESSAGES: Partial<Record<ErrorCode,string>>={
  below_floor:'A unit price is below that item\'s floor.',out_of_stock:'Not enough available stock.',
  business_name_taken:'That business name is taken.',business_limit:'Business limit reached.',
  not_delegated:'This business does not let the seller agent negotiate for it.',
+ round_limit:'The negotiation reached its round limit and was closed.',too_many_requests:'Too many open or recent requests.',
+ request_expired:'The request passed its delivery deadline.',
  budget_exceeded:'The total exceeds the buyer budget.',requirements_mismatch:'The offer does not match the request requirements.',
  idempotency_conflict:'Idempotency-Key reused with a different body.',idempotency_key_required:'Idempotency-Key header is required.',
  invalid_input:'The request body is invalid.',database_error:'The backend is temporarily unavailable.',
@@ -92,6 +97,13 @@ export const buyerView=<T,>(x: T)=>strip(x,HIDDEN.buyer) as BuyerView<T>;
 export const sellerView=<T,>(x: T)=>strip(x,HIDDEN.seller) as SellerView<T>;
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Offer and counter notes (the SQL enforces the same cap). */
+export const NOTE_MAX=500;
+/** The SQL closes a session at its round limit and commits that; the caller still gets 409 round_limit. */
+export function roundLimited<T>(result: T | RoundLimited): T {
+ if(isObject(result)&&(result as Partial<RoundLimited>).round_limit===true) throw fail('round_limit');
+ return result as T;
+}
 const isObject=(value: unknown): value is Record<string,unknown>=>!!value&&typeof value==='object';
 export function id(value: unknown) { if(typeof value!=='string'||!uuid.test(value)) throw fail('invalid_id'); return value; }
 function int(value: unknown,name: string,opts?: {min?: number; max?: number; optional?: false}): number;
@@ -241,9 +253,9 @@ export class Negotiation {
   this.need(p,'buyer','buyer_agent'); const b=object(body);
   const args={p_session:id(sessionId),p_key:key(idempotencyKey),
    p_expected_version:int(b.expected_version,'expected_version'),p_total_cents:int(b.total_cents,'total_cents',{min:1}),
-   p_note:text(b.note,'note',2000)};
+   p_note:text(b.note,'note',NOTE_MAX)};
   // Validated before any lookup; the buyer agent's counter is the buyer's (same budget, same keys).
-  return this.rpc<CreatedCounter>('commerce_buyer_counter',{p_buyer:await this.actingBuyer(p,{session:args.p_session}),...args});
+  return roundLimited(await this.rpc<CreatedCounter | RoundLimited>('commerce_buyer_counter',{p_buyer:await this.actingBuyer(p,{session:args.p_session}),...args}));
  }
 
  // Buyer (or the buyer agent) or seller
@@ -295,17 +307,40 @@ export class Negotiation {
    return {inventory_id:item.inventory_id,quantity:int(item.quantity,`items[${i}].quantity`,{min:1,max:100}),
     unit_cents:int(item.unit_cents,`items[${i}].unit_cents`,{min:1,max:100000000})};
   });
-  return this.rpc<CreatedOffer>('commerce_seller_offer',{p_seller:p.seller_id,p_session:id(sessionId),p_key:key(idempotencyKey),
+  return roundLimited(await this.rpc<CreatedOffer | RoundLimited>('commerce_seller_offer',{p_seller:p.seller_id,p_session:id(sessionId),p_key:key(idempotencyKey),
    p_expected_version:int(b.expected_version,'expected_version'),p_items:items,
-   p_delivery_cents:int(b.delivery_cents,'delivery_cents',{max:10000000,optional:true}),p_note:text(b.note,'note',2000)});
+   p_delivery_cents:int(b.delivery_cents,'delivery_cents',{max:10000000,optional:true}),p_note:text(b.note,'note',NOTE_MAX)}));
  }
 
  // Worker
- async workerEvents(p: RolePrincipal,limit?: string | null) {
+ /**
+  * Pending outbox events. Feed version 1 (default) is what existing runners understand; v=2 adds
+  * 'session.closed' and the buyer's 'order.confirmed' notice (migration 0800).
+  */
+ async workerEvents(p: RolePrincipal,limit?: string | null,version?: string | null) {
   this.need(p,'worker');
   const n=limit==null||limit===''?20:Number(limit);
   if(!Number.isInteger(n)||n<1||n>100) throw fail('invalid_input','limit must be an integer between 1 and 100');
-  return this.rpc<WorkerEvent[]>('commerce_worker_events',{p_limit:n});
+  const v=version==null||version===''?1:Number(version);
+  if(v!==1&&v!==2) throw fail('invalid_input','v must be 1 or 2');
+  if(v===1) return this.rpc<WorkerEvent[]>('commerce_worker_events',{p_limit:n});
+  try {return await this.rpc<WorkerEvent[]>('commerce_worker_events',{p_limit:n,p_v:v});}
+  catch(e) {
+   // Before migration 0800 there is only the version 1 feed.
+   if(e instanceof CommerceError&&e.code==='database_error') return this.rpc<WorkerEvent[]>('commerce_worker_events',{p_limit:n});
+   throw e;
+  }
+ }
+ /** Release stale holds and expire requests past their deadline (the runner calls this every minute). */
+ async sweep(p: RolePrincipal): Promise<SweepResult> {
+  this.need(p,'worker');
+  try {return await this.rpc<SweepResult>('commerce_sweep',{});}
+  catch(e) {
+   // Before migration 0800: the stale-hold release still runs.
+   if(!(e instanceof CommerceError&&e.code==='database_error')) throw e;
+   const released=await this.rpc<number>('commerce_release_stale_holds',{});
+   return {released_holds:Number(released)||0,expired_requests:0,closed_sessions:0,partial:true};
+  }
  }
  /** Ack, optionally with how the runner delivered the event (an Inkbox A2A receipt). The SQL keeps allowlisted keys only. */
  async ackEvent(p: RolePrincipal,eventId: unknown,body?: unknown) {

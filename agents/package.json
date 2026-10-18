@@ -9,7 +9,8 @@
     "start": "node src/main.ts",
     "inkbox:smoke": "node --env-file-if-exists=.env.local scripts/inkbox-smoke.ts",
     "test": "node --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "start:sandboxed": "sh scripts/start-sandboxed.sh"
   },
   "dependencies": {
     "@inkbox/sdk": "0.7.19",

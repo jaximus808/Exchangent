@@ -8,6 +8,7 @@ import type { MCPServer } from "mcp-use";
 import { z } from "zod";
 import { callBackend, deriveIdempotencyKey, errorResult, okResult, runTool, shapeData, type CallContext, type ExchangentResult, type HintContext } from "./adapter.ts";
 import { authMode, type ExchangentUser } from "./auth.ts";
+import { registerResolutionTools } from "./resolution.ts";
 
 const id = (what: string) => z.string().min(1).describe(`The ${what} ID (UUID) returned by an earlier Exchangent tool.`);
 const cents = (what: string) =>
@@ -34,9 +35,9 @@ const BUYER: HintContext = { role: "buyer", reread: "get_buy_order" };
 const SELLER: HintContext = { role: "seller", reread: "get_negotiation" };
 const WHOAMI: HintContext = { role: "buyer", reread: "whoami" };
 
-const BUYER_NEXT = "This connection acts for a buyer: use create_buy_order, get_buy_order, get_conversation, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link and get_reservation_status. To sell as well, call register_business, then reconnect and choose that business.";
+const BUYER_NEXT = "This connection acts for a buyer: use create_buy_order, get_buy_order, get_conversation, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link and get_reservation_status; after paying, list_my_orders, get_order, confirm_received and open_case for problems. To sell as well, call register_business, then reconnect and choose that business.";
 const sellerNext = (sellerId: unknown) =>
-  `This connection acts for business ${String(sellerId)}: use get_business, update_business, upsert_inventory_item, get_inventory, list_my_requests, get_negotiation, make_offer and decline_request.`;
+  `This connection acts for business ${String(sellerId)}: use get_business, update_business, upsert_inventory_item, get_inventory, list_my_requests, get_negotiation, make_offer and decline_request; after a sale, list_orders, mark_shipped, list_cases, respond_to_case and set_resolution_policy.`;
 const BUSINESS: HintContext = { role: "seller", reread: "get_business" };
 const REGISTER: HintContext = { role: "buyer", reread: "whoami" };
 
@@ -108,7 +109,10 @@ export function registerTools(server: MCPServer) {
         { method: "POST", path: "/buy-requests", body, idempotencyKey: idempotency_key ?? deriveIdempotencyKey("create_buy_order", undefined, undefined, body) },
         BUYER,
         { statusKey: "request_status" },
-        (d) => `Buy order ${d.request_id ?? ""} is open with ${Array.isArray(d.sessions) ? d.sessions.length : 0} seller session(s); call get_conversation to watch the agents negotiate (or share watch_url for the live page), and list_offers or get_buy_order later to see seller offers.`,
+        (d) =>
+          Array.isArray(d.sessions) && d.sessions.length === 0
+            ? `Buy order ${d.request_id ?? ""} is saved, but no business matches it yet: check the region spelling, the item attributes (e.g. max_width_in), and whether deliver_by leaves sellers enough days to deliver. Ask the human before loosening any requirement.`
+            : `Buy order ${d.request_id ?? ""} is open with ${Array.isArray(d.sessions) ? d.sessions.length : 0} seller session(s); call get_conversation to watch the agents negotiate (or share watch_url for the live page), and list_offers or get_buy_order later to see seller offers.`,
       ));
     },
   );
@@ -180,7 +184,7 @@ export function registerTools(server: MCPServer) {
         session_id: id("negotiation session"),
         expected_version: expectedVersion,
         total_cents: cents("Proposed all-in total (items + delivery)"),
-        note: z.string().max(1000).optional().describe("Short message to the seller explaining the counter."),
+        note: z.string().max(500).optional().describe("Short message to the seller explaining the counter."),
         idempotency_key: idempotencyKey,
       }),
       outputSchema: resultSchema,
@@ -390,7 +394,7 @@ export function registerTools(server: MCPServer) {
           .min(1)
           .describe("Line items in this offer."),
         delivery_cents: z.number().int().min(0).describe("Delivery fee in integer US cents (0 for free delivery)."),
-        note: z.string().max(1000).optional().describe("Short message to the buyer."),
+        note: z.string().max(500).optional().describe("Short message to the buyer."),
         idempotency_key: idempotencyKey,
       }),
       outputSchema: resultSchema,
@@ -583,5 +587,7 @@ export function registerTools(server: MCPServer) {
     },
   );
 
-  return {whoami, create_buy_order, get_buy_order, get_conversation, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request, register_business, get_business, update_business, upsert_inventory_item};
+  const resolution = registerResolutionTools(server);
+
+  return {...resolution, whoami, create_buy_order, get_buy_order, get_conversation, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request, register_business, get_business, update_business, upsert_inventory_item};
 }

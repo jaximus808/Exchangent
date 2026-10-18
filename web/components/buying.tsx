@@ -6,9 +6,10 @@ import {api,ApiError,errorText,money,type BuyRequest,type Offer,type OrderStatus
 import {Thread} from './thread';
 import {Connect} from './connect';
 import {Empty,Status} from './ui';
+import {BuyerOrders} from './orders';
 
 export const requestTitle=(r:BuyRequest,c?:Conversation|null)=>c?.title||r.title||r.requirements.split('\n')[0].slice(0,80)||'Untitled request';
-export const statusText=(status:string)=>({negotiating:'Negotiating',awaiting_payment:'Reserved · pay to finish',confirmed:'Purchased'}[status]??status.replaceAll('_',' '));
+export const statusText=(status:string)=>({negotiating:'Negotiating',awaiting_payment:'Reserved · pay to finish',confirmed:'Purchased',expired:'Expired · deadline passed'}[status]??status.replaceAll('_',' '));
 export const statusTone=(status:string)=>status==='negotiating'?'live' as const:status==='confirmed'?'done' as const:'neutral' as const;
 const dateLabel=(d:string)=>new Date(d).toLocaleDateString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
 export const reservationKey=(userId:string)=>`exchangent-reservation-${userId}`;
@@ -105,9 +106,9 @@ function RequestDetail({userId,request,conv,onChanged}:{userId:string;request:Bu
 export function Buying({userId,requests,convs,loading,selected,onSelect,onChanged}:{userId:string;requests:BuyRequest[];convs:Record<string,Conversation|null>;loading:boolean;selected:string;onSelect:(id:string)=>void;onChanged:()=>void}) {
  const active=requests.find(r=>r.id===selected)??requests[0];
  if(loading) return <div className="skeleton-wrap" aria-label="Loading requests"><div className="skeleton large"/><div className="skeleton"/></div>;
- if(!requests.length) return <div className="stack-gap"><Empty title="No requests yet." icon={<MessageSquareText size={30} strokeWidth={1.2}/>}>Ask Claude for what you need. Your request, every seller’s offer and the whole negotiation show up here.</Empty><Connect/></div>;
- return <div className="buying-grid">
+ if(!requests.length) return <div className="stack-gap"><Empty title="No requests yet." icon={<MessageSquareText size={30} strokeWidth={1.2}/>}>Ask Claude for what you need. Your request, every seller’s offer and the whole negotiation show up here.</Empty><BuyerOrders/><Connect/></div>;
+ return <div className="stack-gap"><div className="buying-grid">
   <div className="request-list" role="list">{requests.map(r=><div role="listitem" key={r.id}><RequestCard request={r} conv={convs[r.id]} active={active?.id===r.id} onSelect={()=>onSelect(r.id)}/></div>)}</div>
   {active&&<RequestDetail key={active.id} userId={userId} request={active} conv={convs[active.id]} onChanged={onChanged}/>}
- </div>;
+ </div><BuyerOrders/></div>;
 }

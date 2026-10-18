@@ -39,3 +39,17 @@ test("readPayload: a seller negotiation's seller settings (no id or name) still 
   const data = readPayload({ status: "ok", session_id: "s1", seller: { service_area: "san_francisco", delivery_days: 1, delivery_cents: 1500 }, history: [] });
   assert.equal(data.session_id, "s1");
 });
+
+test('resolution panel helpers: remedy wording, case labels and a simulated delivery timeline', async () => {
+ const {remedyLabel,caseTypeLabel,timeline,readResolution}=await import('../views/shared/resolution-data.ts');
+ assert.equal(remedyLabel({kind:'keep_with_discount',amount_cents:6000}),'Keep it with $60.00 back');
+ assert.equal(remedyLabel({kind:'return_for_refund',return_shipping_paid_by:'seller'}),'Return for a refund (seller pays return shipping)');
+ assert.equal(remedyLabel({kind:'something_new'}),'something new');
+ assert.equal(caseTypeLabel('substitution'),'Out of stock · substitute offered');
+ const data=readResolution({status:'ok',order_status:'delivered',created_at:'2026-10-18T04:00:00Z',shipped_at:'2026-10-18T04:30:00Z',carrier:'UPS',tracking:'1Z',delivered_at:'2026-10-18T04:45:00Z',delivery_evidence:{source:'simulated'}});
+ const steps=timeline(data);
+ assert.deepEqual(steps.map(s=>s.done),[true,true,true,false]);
+ assert.equal(steps[2].detail,'Simulated carrier scan (test mode)');
+ assert.equal(steps[1].detail,'UPS · 1Z');
+ assert.throws(()=>readResolution({status:'nope'}));
+});

@@ -14,9 +14,9 @@ import type { Config } from "../config.ts";
 import type { InkboxTransportDeps } from "./inkbox.ts";
 import type { EmailMessage } from "../notify.ts";
 
-export const PUBLIC_PAYLOAD_KEYS = ["session_id", "request_id", "offer_id", "counter_id", "total_cents", "note"] as const;
+export const PUBLIC_PAYLOAD_KEYS = ["session_id", "request_id", "offer_id", "counter_id", "total_cents", "note", "case_id", "order_id"] as const;
 
-/** The whitelisted, public part of an outbox payload. */
+/** The whitelisted, public part of an outbox payload. Case events (doc/resolution-contract.md) carry case_id and order_id instead of a session. */
 export type PublicPayload = {
   session_id: string;
   request_id?: string;
@@ -24,7 +24,20 @@ export type PublicPayload = {
   counter_id?: string;
   total_cents?: number;
   note?: string;
+  case_id?: string;
+  order_id?: string;
 };
+
+/** One inbound email (email-your-agent). `createdAt` is ISO; `messageId` is the RFC 5322 Message-ID for threading. */
+export interface InboundEmail {
+  id: string;
+  messageId: string | null;
+  threadId: string | null;
+  from: string;
+  subject: string | null;
+  snippet: string | null;
+  createdAt: string;
+}
 
 /** What a transport hands to an agent's mailbox. `id` is the outbox event id. */
 export interface TransportMessage {
@@ -72,6 +85,11 @@ export interface Transport {
   email(from: Agent, message: EmailMessage): Promise<void>;
   /** False when this agent has no mailbox here (Inkbox: no identity); the caller sends from another agent. */
   hasMailbox?(agent: Agent): boolean;
+  /** Inbound emails to this agent's mailbox since `since`, oldest first (Inkbox only; email-your-agent). */
+  inboundEmails?(agent: Agent, since: Date | null): Promise<InboundEmail[]>;
+  markEmailsRead?(agent: Agent, ids: string[]): Promise<void>;
+  /** Our own identities' addresses (mail from them is never answered). */
+  ownEmailAddresses?(): Promise<string[]>;
   close(): Promise<void>;
 }
 

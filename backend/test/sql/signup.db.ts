@@ -90,7 +90,7 @@ test('register a business from the consent page or a buyer token; names are uniq
  const second=ok<RegisteredBusiness>(await call('POST','/businesses',owner.buyerToken,{name:'Owner Second Shop'}));
  assert.equal(second.business.delivery_days,2);assert.equal(second.business.delivery_cents,0);
  assert.match(second.next,/choose Owner Second Shop/);
- for(const bad of [{},{name:'x'},{name:'Fine Name',service_area:'San Francisco'},{name:'Fine Name',delivery_days:31},
+ for(const bad of [{},{name:'x'},{name:'Fine Name',service_area:'San Francisco 94103'},{name:'Fine Name',delivery_days:31},
   {name:'Fine Name',delivery_cents:-1},{name:'Fine Name',delivery_cents:'1500'}])
   err(await call('POST','/businesses',owner.buyerToken,bad),'invalid_input',400);
  for(let i=3;i<=5;i++) ok(await call('POST','/businesses',owner.buyerToken,{name:`Owner Shop ${i}`}));
@@ -217,7 +217,9 @@ test('turning agent negotiation off revokes seller agent tokens and stops mintin
 
 test('anon and authenticated roles cannot run the new functions',async()=>{
  const fns=['commerce_business_json(uuid)','commerce_register_business(uuid,text,text,integer,integer)','commerce_update_business(uuid,jsonb)',
-  'commerce_upsert_inventory(uuid,jsonb)','commerce_mint_seller_agent_token(uuid,text,integer)','commerce_worker_events(integer)',
+  'commerce_upsert_inventory(uuid,jsonb)','commerce_mint_seller_agent_token(uuid,text,integer)',
+  // 0800 (hardening) added the feed version: commerce_worker_events(integer, integer).
+  'commerce_worker_events(integer,integer)',
   // 0700 (conversation) replaced the one-argument ack with commerce_ack_event(uuid, jsonb).
   'commerce_ack_event(uuid,jsonb)'];
  for(const role of ['anon','authenticated']) for(const fn of fns) {

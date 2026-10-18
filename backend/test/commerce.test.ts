@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Stripe from 'stripe';
-import { Commerce, assertTestKey, validateSession } from '../src/commerce.ts';
+import { Commerce, CommerceError, assertTestKey, checkoutLineItems, validateSession } from '../src/commerce.ts';
 import type { Db } from '../src/types.ts';
 // Test doubles implement only what each case touches.
 const stub=<T,>(value: unknown)=>value as T;
@@ -68,4 +68,33 @@ test('receipt uses reserved item snapshots and checks ownership before private r
  assert.deepEqual(receipt.seller,{id:'seller',name:'Demo seller'});assert.deepEqual(receipt.items,items);
  items[0].unit_cents=1;
  await assert.rejects(c.status('buyer',reservation.id),/reservation_pricing_mismatch/);
+});
+test('checkout lines: one per reserved item, then delivery and tax, adding up to the total',()=>{
+ const lines=checkoutLineItems({items:[{title:'Walnut desk 46in',quantity:1,unit_cents:21000},{title:'Mesh chair',quantity:2,unit_cents:7500}],
+  delivery_cents:1500,tax_cents:0,seller_name:'Alex Woodworks',total_cents:37500,currency:'usd'});
+ assert.deepEqual(lines.map(l=>[l.price_data.product_data.name,l.quantity,l.price_data.unit_amount]),
+  [['Walnut desk 46in',1,21000],['Mesh chair',2,7500],['Delivery',1,1500]]);
+ assert.ok(lines.every(l=>l.price_data.currency==='usd'&&l.price_data.product_data.description==='Sold by Alex Woodworks via Exchangent'));
+ assert.ok(!/demo|fictional/i.test(JSON.stringify(lines)));
+ const taxed=checkoutLineItems({items:[{title:'x'.repeat(300),quantity:1,unit_cents:100}],delivery_cents:0,tax_cents:9,seller_name:'S',total_cents:109,currency:'usd'});
+ assert.deepEqual(taxed.map(l=>l.price_data.product_data.name.length),[250,3]);
+ for(const bad of [{total_cents:37499},{items:[]}]) assert.throws(()=>checkoutLineItems({items:[{title:'Desk',quantity:1,unit_cents:100}],
+  delivery_cents:0,tax_cents:0,seller_name:'S',total_cents:100,currency:'usd',...bad}),/reservation_pricing_mismatch/);
+});
+test('the paid order keeps its PaymentIntent; before migration 0800 the payment still applies without it',async()=>{
+ const {c,calls}=setup({...session,payment_intent:'pi_test_1'} as typeof session);
+ const raw=event();await c.webhook(raw,signed(raw));
+ assert.equal(calls[0].args.p_payment_intent,'pi_test_1');
+ const old=setup({...session,payment_intent:{id:'pi_test_2'}} as unknown as typeof session);
+ old.c.rpc=async<T,>(name: string,args: Record<string, unknown>)=>{
+  old.calls.push({name,args});
+  if('p_payment_intent' in args) throw new CommerceError('function public.commerce_apply_payment(p_payment_intent => text) does not exist');
+  return {confirmed:true} as T;
+ };
+ await old.c.webhook(raw,signed(raw));
+ assert.deepEqual(old.calls.map(x=>x.args.p_payment_intent),['pi_test_2',undefined]);
+ const rule=setup({...session,payment_intent:'pi_test_3'} as typeof session);
+ rule.c.rpc=async<T,>(name: string,args: Record<string, unknown>)=>{rule.calls.push({name,args});throw new CommerceError('payment_requires_reconciliation');};
+ await assert.rejects(rule.c.webhook(raw,signed(raw)),/payment_requires_reconciliation/);
+ assert.equal(rule.calls.length,1,'a real refusal is never retried');
 });

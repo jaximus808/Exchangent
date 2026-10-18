@@ -303,6 +303,200 @@ or connector token gets 404.
 - `invalid_input`: 400.
 - `business_name_taken`: 409.
 
+## Hardening round 1 (migration 0800)
+
+This section covers `migrations/20261018000800_hardening.sql` and `doc/hardening-contract.md`. Apply the migration
+**before** deploying this backend; the backend falls back where it can (see "Rollout").
+
+**Limits**
+- **Round limit:** a session allows 8 seller offers. A counter after the 8th offer, or a 9th offer, closes the
+  session, and the close is committed. It answers `409 round_limit`, and later moves get `409 session_closed`.
+  The closed session's offers can no longer be reserved.
+- **Request caps:** each signed-up person may have 5 requests in `negotiating` and create 20 per 24 hours.
+  `POST /buy-requests` beyond that answers `429 too_many_requests`. A retried call with the same
+  Idempotency-Key for a live request still replays it at the cap. Seeded demo actors (`is_demo`) are exempt.
+- **Notes:** offer and counter notes are at most 500 characters (`400 invalid_input`), enforced in HTTP
+  validation and in SQL.
+- **Offers** expire after 24 hours (previously 2).
+
+**Matching** (`POST /buy-requests`)
+- **Own businesses:** a buyer's own businesses are never matched.
+- **Regions:** compared after normalizing with `commerce_norm_region`: lowercase, other characters become `_`,
+  and `sf`, `San Francisco, CA` and similar become `san_francisco`. Business service areas are stored
+  normalized: `POST/PATCH` with `"San Francisco"` stores `san_francisco`, and digits are still invalid.
+- **Deadline:** `requirements.deliver_by` becomes the request `deadline` when no `deadline` is sent.
+  - A date (`YYYY-MM-DD`) means the end of that day anywhere on Earth: the next day, 12:00 UTC. A buyer in San
+    Francisco asking for "tomorrow" in the evening still matches next-day sellers.
+  - An ISO 8601 timestamp (`YYYY-MM-DDTHH:MM…`) is used as given.
+  - Anything else, including words like `tomorrow`, is ignored, as before.
+  - A seller matches only if `now() + delivery_days days <= deadline`. No deadline means no constraint.
+- **No match** is not an error: the request is created with `sessions: []`.
+
+**Idempotent retries**
+- **Requests:** a reused request key returns the existing request only while it is `negotiating` or
+  `awaiting_payment`. After the request is `confirmed` or `expired`, the same key (identical wording through
+  MCP) creates a new request. Key uniqueness is now a partial unique index over live requests.
+- **Reservations:** `POST /offers/:id/reservations` with a key whose hold is `expired` or `failed` starts a new
+  hold. The dead hold's key is renamed `<key>#<reservation id>`. An expired request answers `409 request_expired`.
+
+**Lifecycle**
+- **Requests:** gain the status `expired` (deadline passed).
+- **Payment:** `commerce_apply_payment` takes an optional `p_payment_intent` and stores it as
+  `commerce_orders.stripe_payment_intent`. The webhook passes `session.payment_intent`. On payment it also:
+  - closes every other open session of the request (`status closed`, `decline_reason 'another offer was accepted'`);
+  - writes a `session.closed` event for each;
+  - writes the buyer's order notice (outbox kind `order.confirmed.buyer`).
+
+  The winning session is left as it was.
+- **Stripe line items:**
+  - one line per reserved item: title × quantity at the snapshot `unit_cents`;
+  - then `Delivery` and `Tax` lines when above 0;
+  - every line's description is `Sold by <seller> via Exchangent`, and names are capped at 250 characters;
+  - the lines must add up to the reservation total, otherwise `reservation_pricing_mismatch`;
+  - the Stripe idempotency key is unchanged.
+
+**`POST /api/v1/worker/sweep`** (worker; the runner calls it every minute) returns
+`{released_holds, expired_requests, closed_sessions}`. It releases stale holds and expires `negotiating`
+requests past their deadline, closing their open sessions with reason `deadline passed` and a `session.closed`
+event each. Rows that are busy are left for the next sweep. Before the migration it only releases holds and adds
+`partial: true`.
+
+**Worker feed versions:** `GET /api/v1/worker/events?limit=&v=`
+- **`v=1`** (the default, what the running runner asks for) is unchanged.
+- **`v=2`** adds two kinds:
+  - **`session.closed`:** `route.to_role` is `seller`, with the usual route fields. Payload:
+    `{session_id, request_id, reason}`. `reason` is `round limit`, `another offer was accepted` or
+    `deadline passed`.
+  - **`order.confirmed` with `route.to_role` `buyer`:** the buyer's order notice. Route
+    `{to_role:'buyer', request_id, seller_id, buyer_id, agent_handle?, delegated, seller_delegated}`. Payload:
+    `{order_id, reservation_id, request_id, seller_id, seller_name, total_cents, currency, title}`. The
+    seller's sale notice stays `to_role 'seller'` (it has no `seller_name`).
+- **Ack:** both notices ack as `kind: "order.confirmed"`, and `session.closed` acks as itself.
+- **Errors:** any other `v` is `400 invalid_input`.
+
+**New error codes**
+
+| Code | Status | When |
+|---|---|---|
+| `round_limit` | 409 | The session reached its round limit and closed |
+| `too_many_requests` | 429 | Request caps |
+| `request_expired` | 409 | Reserving on an expired request |
+
+**Rollout**
+- **Order:** apply 0800, then deploy the backend, then switch the runner to `v=2` and the sweep.
+- **Backend fallbacks without 0800:**
+  - the webhook retries `commerce_apply_payment` without `p_payment_intent`;
+  - `v=2` falls back to the v1 feed;
+  - the sweep falls back to `commerce_release_stale_holds`.
+- **Old runner after 0800:** the currently deployed runner (feed v1) never sees the new kinds, so it never takes a
+  brain turn on `session.closed` or acks the buyer's notice. Until a v2 runner reads them, those rows wait in the
+  outbox.
+
+## Orders, cases, refunds and chargebacks (migration 0900)
+
+`src/resolution.ts`, `src/disputes.ts`; design in `doc/resolution-design.md`, contract in
+`doc/resolution-contract.md`. The SQL functions decide everything (who may act, which automatic rule
+applies, what is still refundable); the backend executes the refunds they return through Stripe with
+Idempotency-Key `exchangent-refund-<refund_id>` and records the result. All responses are `{data}`.
+
+**Order JSON** (`GET /orders/:id`, lists): `{order_id, request_id, title, seller_id, seller_name, status
+(confirmed|shipped|delivered|closed|cancelled|refunded), total_cents, refunded_cents, refundable_cents,
+currency, created_at, shipped_at, delivered_at, carrier, tracking, delivery_evidence:{source:
+carrier|simulated|buyer_confirmed, at}|null, dispute_window_ends_at, deliver_by, delivery_cents, tax_cents,
+items:[{inventory_id,title,quantity,unit_cents,category}], cases:[{case_id,type,status,opened_by,turn,version,
+updated_at}], refunds:[{refund_id,amount_cents,status,reason,case_id,created_at}], disputes:[{dispute_id,status,
+reason,amount_cents,decision,submitted_at}]}`. Seller views add `shipping_name:"Buyer"` (no buyer identity).
+
+**Case JSON**: `{case_id, order_id, request_id, seller_id, seller_name, title, type, opened_by, status
+(open|resolved|escalated|closed), turn (buyer|seller|null), version, rounds, items, description, evidence:[{kind,
+ref, by, at}], remedy (the proposal on the table)|null, remedy_by, requested_remedy, resolution:{...remedy,
+amount_cents, how: auto|policy|agreed, by, at}|null, substitute_check|null, total_cents, refunded_cents,
+refundable_cents, order:{status,total_cents,refunded_cents,refundable_cents,shipped_at,delivered_at,carrier,tracking,
+delivery_evidence,deliver_by,items}, moves:[{by, action: open|offer|accept|decline|auto|escalate|evidence|
+return_received, remedy?, note?, version, at}], refunds:[...], created_at, updated_at}`. Seller views also carry
+`policy`; buyer and buyer-agent views never do (its auto-approve limit works like a floor).
+
+**Remedy** (request bodies): `{kind: refund_full|refund_partial|refund_items|replace|return_for_refund|
+keep_with_discount|sla_credit|cancel, amount_cents?, items?:[{inventory_id, quantity?}], return_shipping_paid_by?}`.
+The backend computes item amounts from the paid snapshots and caps every amount at `refundable_cents`.
+`cancel` only before shipping; `return_for_refund` refunds when the seller confirms the return; a cheaper
+substitute refunds the difference.
+
+| Route | Who | Body / notes |
+|---|---|---|
+| `GET /orders` | buyer (role, connector or user session) | The buyer's orders, newest first (50) |
+| `GET /orders/:id` | buyer, buyer agent (delegated), seller | Order JSON |
+| `POST /orders/:id/received` | buyer only | Delivered, evidence `buyer_confirmed` |
+| `POST /orders/:id/cases` | buyer only | `{type, items?, description?, evidence?, requested_remedy?}`, Idempotency-Key. Applies the automatic rules first (below). |
+| `GET /cases/:id` | buyer, buyer agent (delegated), seller | Case JSON |
+| `POST /cases/:id/respond` | the side whose turn it is | `{expected_version, action: accept\|counter\|decline, remedy?, note?}`. Six counters, then `escalated`; decline escalates. |
+| `POST /cases/:id/evidence` | either side, open or escalated case | `{kind, ref}` or `{evidence:[...]}` (max 20 per case) |
+| `POST /refunds/:id/retry` | buyer or seller of the order | Re-executes a failed refund (same Stripe idempotency key) |
+| `GET /seller/orders`, `GET /seller/cases` | seller (agents too) | Lists |
+| `POST /seller/orders/:id/ship` | owner only | `{carrier, tracking}`; confirmed → shipped |
+| `POST /seller/orders/:id/simulate-delivery` | owner only, Stripe test mode | shipped → delivered, evidence `simulated`; returns `simulated:true` |
+| `POST /seller/orders/:id/issue` | owner only | `{kind: out_of_stock\|address_problem, items?, substitute?:{replaces, inventory_id, unit_cents?}, note?}` |
+| `POST /cases/:id/return-received` | owner only | Restocks and refunds a `return_for_refund` |
+| `GET` / `PUT /seller/policy` | seller / owner only | Policy below |
+| `GET /worker/buyer-requests?email=` | worker | Email-your-agent lookup (below) |
+| `GET /worker/sellers/:id/owner` | worker | `{seller_id, name, owner_email\|null}` for owner notices |
+| `POST /worker/resolution-sweep` | worker | Closes delivered orders past the dispute window: `{orders_closed}` |
+
+Owner only = a seller token whose label is not `agents:*` (agent tokens get 403): physical-world facts and the
+policy come from the owner. User-session twins for the web dashboard: `GET /api/v1/orders`, `GET|POST
+/api/v1/orders/:id[/received|/cases]`, `GET|POST /api/v1/cases/:id[/respond|/evidence]`, and for an owner
+`GET /api/v1/businesses/:id/orders|cases`, `POST /api/v1/businesses/:id/orders/:oid/ship|simulate-delivery`,
+`POST /api/v1/businesses/:id/cases/:cid/respond|evidence|return-received`, `GET|PUT /api/v1/businesses/:id/policy`.
+
+**Automatic rules** (`commerce_open_case`): `not_received` with no delivery recorded after the deadline (request
+deadline, else `deliver_by`, else shipping/order time) plus `auto_refund_not_received_after_days` → refund the
+items (all if none given); `late` delivered after the deadline → `sla_credit` of the delivery fee;
+`duplicate_charge` → the closest other paid order of the same buyer, seller and total within 10 minutes is
+cancelled, restocked and refunded; `changed_mind` → `cancel` before shipping, declined after the return window,
+else `return_for_refund` minus `restocking_fee_pct`; a `requested_remedy` of `refund_partial` or
+`keep_with_discount` at or below `max_auto_partial_refund_pct` of the total → accepted under policy.
+
+**Policy** (`GET|PUT /seller/policy`, defaults): `auto_refund_not_received_after_days 3,
+max_auto_partial_refund_pct 15, return_window_days 14, restocking_fee_pct 0,
+seller_pays_return_shipping_when_at_fault true, price_protection_days 0, fight_chargebacks_above_cents 5000`.
+Unknown keys, non-integers and out-of-range values are `invalid_input`.
+
+**Chargebacks** (`POST /webhooks/stripe`): `charge.dispute.created` finds the order by PaymentIntent (orders paid
+before 0800 are found through their Checkout Session), then decides once: **fight** when the order is already
+refunded for the amount, or when it was delivered or the reason is `fraudulent`/`unrecognized` and the amount is
+at least `fight_chargebacks_above_cents`; otherwise **accept** (`disputes.close`). Fighting submits text
+evidence only: `product_description` (items and attributes), `uncategorized_text` (the buyer's own payment
+approval with timestamps, delivery, refunds, cases), `access_activity_log` (the negotiation transcript),
+`refund_policy_disclosure`, shipping fields and `refund_refusal_explanation`. `charge.dispute.updated|closed`
+update the status; `charge.refunded` settles refunds Stripe accepted as pending.
+
+**Errors**: `order_not_found`/`case_not_found`/`refund_not_found` 404, `item_not_in_order` 400,
+`case_already_open`, `order_closed`, `case_closed`, `stale_case`, `not_your_turn`, `nothing_to_accept`,
+`already_shipped`, `order_not_shippable`, `order_not_shipped`, `no_return_expected`, `price_increase_not_allowed`,
+`below_floor`, `out_of_stock` 409, `test_mode_only` 403, `refund_failed` 502 (the case is already resolved; retry
+the refund).
+
+**Worker feed**: resolution events are separate outbox rows (`res:<event>:<to_role>`) shown only to a runner that
+asks: `GET /worker/events?include=resolution` merges them, in creation order, with the negotiation feed. Kinds
+and `route.to_role`: `order.shipped`, `order.delivered`, `refund.succeeded` → buyer; `case.opened` → the side to
+answer; `case.offer` → the other side; `case.resolved`, `case.escalated` → one row each for buyer and seller;
+`dispute.created`, `dispute.decided` → seller. `route` adds `order_id` and `case_id` to the usual fields
+(`request_id, seller_id, buyer_id, agent_handle, delegated, seller_delegated`). Payloads: cases
+`{case_id, order_id, request_id, seller_id, type, status, turn, version, opened_by, remedy_kind, amount_cents, title}`;
+orders `{order_id, request_id, seller_id, seller_name, status, total_cents, carrier, tracking, title}`; refunds
+`{refund_id, order_id, case_id, amount_cents, reason, seller_id, title}`; disputes add `{dispute_id, reason,
+amount_cents, decision}` to the order payload. Ack them with the usual `POST /worker/events/:id/ack` (receipts
+accepted).
+
+**Email your agent** (`GET /worker/buyer-requests?email=`): the delegated requests (negotiating, awaiting payment,
+or confirmed in the last 14 days) of the account with exactly that email, newest first, max 10:
+`[{request_id, title, status, created_at, sessions_open, best_offer:{seller_name,total_cents}|null,
+order:{order_id,status,seller_name,total_cents}|null, watch_path:"/watch/<id>"}]`. No budgets, targets or other
+people's data; reply only to that same registered address.
+
+**Receipts**: `GET /reservations/:id` keeps `order.status: "confirmed"` while a paid order is shipped, delivered
+or closed (clients checking for `confirmed` keep working) and adds `order.lifecycle_status`.
+
 ## MCP and dashboard integration
 
 - The Manufact MCP OAuth handshake belongs to the teammate. An arbitrary ChatGPT,

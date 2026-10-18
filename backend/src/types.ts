@@ -19,6 +19,8 @@ export type KnownErrorCode =
  | 'reservation_expired' | 'reservation_not_payable' | 'payment_pending' | 'session_conflict'
  // Self-serve businesses and the platform seller agent (migrations/20261018000600_self-serve-signup.sql)
  | 'business_name_taken' | 'business_limit' | 'not_delegated'
+ // Hardening limits and lifecycle (migrations/20261018000800_hardening.sql)
+ | 'round_limit' | 'too_many_requests' | 'request_expired'
  // Payments
  | 'test_key_required' | 'test_session_required' | 'session_mismatch' | 'payment_mismatch' | 'invalid_signature'
  | 'live_event_rejected' | 'reservation_binding_missing'
@@ -89,7 +91,7 @@ export interface RolePrincipal {
 }
 
 // ---------- Table rows (subset of columns the backend reads) ----------
-export type RequestStatus = 'negotiating' | 'awaiting_payment' | 'confirmed';
+export type RequestStatus = 'negotiating' | 'awaiting_payment' | 'confirmed' | 'expired';
 export type ReservationStatus = 'held' | 'checkout_open' | 'payment_pending' | 'consumed' | 'expired' | 'failed';
 export interface RequestRow {
  id: string; buyer_id: string; budget_cents: number; currency: string; status: RequestStatus;
@@ -106,7 +108,9 @@ export interface ReservationRow {
  idempotency_key: string; total_cents: number; currency: string; status: ReservationStatus; expires_at: string;
  checkout_expires_at: number | null; stripe_session_id: string | null; checkout_url: string | null; created_at: string;
 }
-export interface OrderSummary { id: string; status: 'confirmed'; total_cents: number; currency: string; created_at: string }
+/** status stays 'confirmed' for a paid order in fulfilment; lifecycle_status is the order's own status (migration 0900). */
+export interface OrderSummary { id: string; status: 'confirmed' | 'cancelled' | 'refunded'; total_cents: number; currency: string; created_at: string;
+ lifecycle_status?: 'confirmed' | 'shipped' | 'delivered' | 'closed' | 'cancelled' | 'refunded' }
 export interface DelegationRow {
  id: string; actor_id: string; request_id: string | null; seller_id: string | null; scopes: DelegationScope[];
  expires_at: string; revoked_at: string | null;
@@ -163,6 +167,12 @@ export interface InventoryItem {
 export interface CreatedRequest { request_id: string; status: RequestStatus; sessions: { session_id: string; seller_id: string; seller_name: string }[] }
 export interface CreatedOffer { offer_id: string; version: number; total_cents: number; session_version: number }
 export interface CreatedCounter { counter_id: string; session_version: number }
+/** What an offer or counter RPC returns when the session hit the round limit (it is closed, committed). */
+export interface RoundLimited { round_limit: true; session_id: string; status: 'closed' }
+/** POST /worker/sweep. */
+export interface SweepResult { released_holds: number; expired_requests: number; closed_sessions: number; partial?: true }
+/** One Stripe Checkout line (price_data form). */
+export interface CheckoutLine { quantity: number; price_data: { currency: string; unit_amount: number; product_data: { name: string; description?: string } } }
 export interface DeclinedSession { session_id: string; status: SessionStatus; session_version: number }
 /** commerce_delegated_buyer: the buyer a buyer_agent principal acts for. */
 export interface DelegatedBuyer { request_id: string; buyer_id: string }
@@ -184,19 +194,25 @@ export interface RegisteredBusiness { business: BusinessJson; next: string }
 export interface SellerAgentToken { token: string; seller_id: string; name: string; expires_at: string; agent_handle: string | null }
 
 // ---------- Outbox (worker feed) ----------
-/** Negotiation kinds route by session; 'order.confirmed' is the seller's sale notice (always to_role 'seller'). */
-export type OutboxKind = 'session.opened' | 'offer.created' | 'counter.created' | 'session.declined' | 'order.confirmed';
+/**
+ * Negotiation kinds route by session. 'order.confirmed' is the seller's sale notice (to_role 'seller') or, in feed
+ * version 2 (GET /worker/events?v=2), the buyer's order notice (to_role 'buyer'). 'session.closed' (v2 only) tells
+ * the seller a session ended without its offer: round limit, another offer accepted, or the deadline passed.
+ */
+export type OutboxKind = 'session.opened' | 'offer.created' | 'counter.created' | 'session.declined' | 'session.closed' | 'order.confirmed';
 export interface OutboxPayloads {
  'session.opened': { session_id: string; request_id: string };
  'offer.created': { session_id: string; request_id: string; offer_id: string; total_cents: number; note: string | null };
  'counter.created': { session_id: string; counter_id: string; total_cents: number; note: string | null };
  'session.declined': { session_id: string };
- 'order.confirmed': { order_id: string; reservation_id: string; request_id: string; seller_id: string;
+ 'session.closed': { session_id: string; request_id: string; reason: string };
+ /** seller_name is in the buyer's notice only. */
+ 'order.confirmed': { order_id: string; reservation_id: string; request_id: string; seller_id: string; seller_name?: string;
   total_cents: number; currency: string; title: string | null };
 }
 export type WorkerEvent = { [K in OutboxKind]: {
  id: string; kind: K; created_at: string; payload: OutboxPayloads[K];
- route: { to_role: K extends 'order.confirmed' ? 'seller' : Turn; request_id?: string; seller_id?: string; buyer_id?: string; agent_handle?: string;
+ route: { to_role: K extends 'session.closed' ? 'seller' : Turn; request_id?: string; seller_id?: string; buyer_id?: string; agent_handle?: string;
   /** The request's delegate_negotiation: the platform buyer agent negotiates it. */
   delegated: boolean;
   /** The seller's delegate_negotiation: the platform seller agent negotiates for it. */
