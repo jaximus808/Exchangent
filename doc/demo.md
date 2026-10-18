@@ -2,7 +2,7 @@
 
 The story: you tell Claude what you want. Your buyer agent and the sellers' agents haggle with each other over
 Inkbox A2A until they agree. Exchangent's database is the rulebook every agent obeys. The buyer agent emails
-you from its Inkbox mailbox when it has a deal. You reserve and pay in Claude, and Primitive emails the receipt.
+you from its Inkbox mailbox when it has a deal. You reserve and pay in Claude, and the seller's agent emails its owner when the order is paid.
 
 ## How the agents communicate
 
@@ -71,7 +71,8 @@ email creates the account.
    `BRAIN=claude` for the show).
 6. **Payments:**
    - Stripe sandbox webhook `https://exchangent.vercel.app/webhooks/stripe`, with `STRIPE_WEBHOOK_SECRET` on Vercel.
-   - The Primitive receipt needs `PRIMITIVE_API_KEY` and `PRIMITIVE_FROM` (see `backend/SETUP.md`).
+   - Emails come from the agents' Inkbox mailboxes: the deal email (buyer agent) and the sale email (seller agent). The
+     Primitive receipt is optional and stays off unless `PRIMITIVE_API_KEY` and `PRIMITIVE_FROM` are set.
 
 ## Live script (about 4 minutes)
 
@@ -94,9 +95,75 @@ email creates the account.
 4. **Buyer's inbox:** "Deal reached: Alex Woodworks, $300.00".
 5. **Buyer, in Claude:** "reserve the Alex Woodworks offer and get me a checkout link". Pay with
    `4242 4242 4242 4242`.
-6. **Buyer:** "is it paid?" The order is confirmed and the receipt arrives.
+6. **Buyer:** "is it paid?" The order is confirmed.
 7. **Seller's inbox:** "Sold: …, $300.00" from their own agent. **Seller, in Claude:** "show my inventory".
    The stock went down by one of each.
+
+## More scenarios
+
+The buyer is on **claude.ai** with the Exchangent connector, signed in as the buyer email. The seller is in **Claude Code**,
+connected as Alex Woodworks. Use fresh wording each run: an identical order returns the earlier request.
+
+### Scenario 2: desk-only bidding war (four sellers)
+
+Four businesses stock a desk of 48in or less. Their delivered minimums are private, but ranked from lowest:
+Exchangent Seller Test (1 left), Alex Woodworks, Bay Desk Co, Mission Ergonomics. The point is that the cheapest seller
+wins, and Alex's agent never goes below its floor.
+
+1. **Seller (Claude Code):**
+   > Show my inventory. Make sure the walnut desk has at least 2 available.
+2. **Buyer (claude.ai):**
+   > I just need a desk, no chair: 48 inches wide or less, delivered in San Francisco by tomorrow. My budget is $220
+   > all-in and I'd like to pay around $160. Let my agent negotiate.
+3. **Buyer:**
+   > Show me how the agents are negotiating.
+
+   Open "Watch the agents negotiate live ↗" on the big screen. Every seller agent opens at list: $200, $255, $285 and
+   $320. Each one is countered at about $160, and they concede at different speeds.
+4. **Expected result:** the deal email comes from the cheapest seller that reaches the buyer agent's number. Usually
+   that's Exchangent Seller Test (about $160) or Alex Woodworks ($170 is Alex's floor). Bay and Mission stall above $200.
+   - **Say:** "Alex's agent stopped exactly at the owner's private minimum. It can't go lower, because the backend
+     refuses any offer below the floor."
+5. **Buyer:**
+   > Show my offers, then reserve the best one and get me a checkout link.
+
+   Pay with `4242 4242 4242 4242`. Then:
+   > Is my order paid?
+6. **Seller (only if Alex won):**
+   > Show my inventory and recent negotiations.
+
+### Scenario 3: the owner haggles by hand, and the buyer agent switches to the better deal
+
+This scenario shows a person in the loop. The seller turns its agent off and negotiates in chat. The buyer's agent
+still haggles for the buyer, and when a cheaper offer arrives late it reopens the deal.
+
+1. **Seller (Claude Code):**
+   > Turn off agent negotiation for my business.
+2. **Buyer (claude.ai):**
+   > Get me a compact desk under 48 inches and an ergonomic office chair delivered in SF. $400 max, hoping for about
+   > $300. Let my agent negotiate.
+
+   The runner log shows `skipped … seller negotiates in chat` for Alex Woodworks. Bay and Mission haggle with the buyer
+   agent, which settles on Bay at about $370. The buyer gets the deal email.
+3. **Seller:**
+   > Show my open buyer requests.
+
+   Then:
+   > On that request, offer my walnut desk and mesh chair at $310 total including delivery, with the note "Hand-made
+   > walnut, delivered tomorrow."
+4. **Watch:** the buyer agent sees a cheaper late offer and counters Alex at $300.
+5. **Seller:**
+   > Read that negotiation again and accept the buyer's counter.
+6. **Expected result:** the buyer agent switches to Alex Woodworks, and the buyer gets a **"Better deal: Alex
+   Woodworks, $300.00"** email.
+7. **Buyer:**
+   > Show my offers and reserve the Alex Woodworks offer.
+
+   Pay with `4242 4242 4242 4242`, and the seller gets the "Sold" email.
+8. **Seller, afterwards:**
+   > Turn agent negotiation back on.
+
+Measured cost with `BRAIN=claude`: about $0.20 per agent turn, so about $3 for a three-seller haggle.
 
 ## Rehearse locally (no keys, no InsForge, fake Stripe)
 
