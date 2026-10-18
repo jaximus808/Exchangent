@@ -150,6 +150,146 @@ not received, damaged, not as described, late, missing item, or out of stock.
 
 The design is in [doc/resolution-design.md](doc/resolution-design.md).
 
+## Architecture
+
+### The stack
+
+```mermaid
+flowchart LR
+  subgraph People
+    B["Buyer<br/>claude.ai / Claude desktop"]
+    S["Seller<br/>Claude Code / claude.ai"]
+    W["Browser"]
+  end
+
+  subgraph Manufact["Manufact (mcp-use)"]
+    MO["MCP server for people<br/>OAuth · 34 tools · in-chat panels"]
+    MB["MCP server for agents<br/>scoped bearer tokens"]
+  end
+
+  subgraph Vercel
+    WEB["Web app (Next.js)<br/>sign-in · consent · dashboard · /watch"]
+    API["Backend API (Node + TypeScript)<br/>auth · matching · negotiation · checkout ·<br/>orders · cases · refunds · disputes · worker feed"]
+  end
+
+  subgraph InsForge
+    AUTH["Email-code auth"]
+    DB[("Postgres<br/>every rule in SQL functions:<br/>floors · budgets · stock · turns · versions ·<br/>round caps · outbox")]
+  end
+
+  subgraph Runner["Agent runner (team laptop, launchd service)"]
+    D["Dispatcher<br/>polls the feed · acks · retries · sweeps"]
+    BA["Buyer agent<br/>claude -p, MCP tools only"]
+    SA["Seller agents, one per business<br/>claude -p, MCP tools only"]
+  end
+
+  subgraph Inkbox
+    A2A["Agent-to-agent messages<br/>one identity per agent"]
+    MAIL["Agent mailboxes<br/>deal · order · sold · refund emails"]
+  end
+
+  STRIPE["Stripe (test mode)<br/>Checkout · webhook · refunds · disputes"]
+
+  B -- "MCP" --> MO
+  S -- "MCP" --> MO
+  W --> WEB
+  WEB --> API
+  WEB -. "sign-in" .-> AUTH
+  MO -- "REST" --> API
+  MB -- "REST" --> API
+  API --> DB
+  API -. "verify session" .-> AUTH
+  D -- "GET /worker/events" --> API
+  D -- "wake: something changed" --> A2A
+  A2A --> BA
+  A2A --> SA
+  BA -- "MCP tool calls" --> MB
+  SA -- "MCP tool calls" --> MB
+  BA --> MAIL
+  SA --> MAIL
+  MAIL -. "email" .-> B
+  MAIL -. "email" .-> S
+  API -- "create Checkout, refunds,<br/>dispute evidence" --> STRIPE
+  STRIPE -- "verified webhook" --> API
+  B -. "pays" .-> STRIPE
+```
+
+| Part | Role |
+|---|---|
+| **People's assistants** | The buyer and seller each use their own Claude: claude.ai, the desktop app or Claude Code. |
+| **MCP server for people** (Manufact) | The connector people add. OAuth sign-in, a choice of buyer or a business, the tools, and in-chat panels. |
+| **MCP server for agents** (Manufact) | The same tools, called by the platform's agents with scoped, expiring tokens. |
+| **Web app** (Vercel) | Email-code sign-in and the connector consent page. A dashboard for buying, selling, orders and cases, plus the live `/watch/<request>` page. |
+| **Backend API** (Vercel) | One entry point for every action. Checks who is calling and what they're allowed to do, then calls the database functions. Talks to Stripe. |
+| **InsForge Postgres** | The rulebook. Floors, budgets, stock, whose turn it is, round caps, deadlines and versions are enforced in SQL. Each change writes an **outbox** row. |
+| **InsForge auth** | Email-code accounts. A new email creates an account. |
+| **Agent runner** | Polls the outbox feed and wakes the right agent. Each turn is a headless `claude -p` run that can only call Exchangent's MCP tools. Runs as a macOS launchd service. |
+| **Inkbox** | Each agent's identity and mailbox. Agents wake each other with A2A messages ("something changed, go read it") and email people. |
+| **Stripe** (test mode) | A hosted Checkout where a person approves payment. A signed webhook confirms the order. Also refunds, and dispute evidence. |
+
+Agents never trust each other's messages: an A2A message only says "look again". Every price, offer and payment
+is read from, and written through, the backend, which applies the rules.
+
+### Buyer and seller flow
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Buyer
+  participant BC as Buyer's Claude
+  participant MCP as Exchangent MCP
+  participant API as Backend + Postgres
+  participant R as Agent runner
+  participant BA as Buyer agent
+  participant SA as Seller agents
+  participant IB as Inkbox
+  participant ST as Stripe
+  actor Seller
+
+  Seller->>MCP: register_business, upsert_inventory_item (list price + private floor)
+  Buyer->>BC: "desk ≤48in + ergonomic chair, SF, by Thursday, $400"
+  BC->>MCP: create_buy_order
+  MCP->>API: POST /buy-requests
+  API->>API: match sellers (category, attributes, region, deadline, stock — never your own business)
+  API-->>BC: request + live watch link
+  API->>R: outbox: request.created, one per seller
+  R->>IB: A2A wake from buyer agent to each seller agent
+  IB->>SA: message received
+  SA->>MCP: get request, make_offer
+  MCP->>API: offer, checked against the floor
+  loop until a good offer, or the round cap
+    API->>R: outbox: offer.created
+    R->>IB: A2A wake to buyer agent
+    IB->>BA: message received
+    BA->>MCP: list_offers, counter_offer (always under budget)
+    API->>R: outbox: counter.created
+    R->>IB: A2A wake to that seller agent
+    IB->>SA: message received
+    SA->>MCP: counter, concede gradually, or accept
+  end
+  BA->>IB: "Deal reached" email to the buyer
+  Buyer->>BC: "reserve the best offer, get me a checkout link"
+  BC->>MCP: reserve_offer, get_checkout_link
+  MCP->>API: hold stock, create Checkout
+  API->>ST: Checkout Session
+  Buyer->>ST: pays (test card)
+  ST->>API: checkout.session.completed (signed webhook)
+  API->>API: confirm order, take stock, close the losing sessions
+  API->>R: outbox: order.confirmed, session.closed
+  R->>BA: "Order confirmed" email to the buyer
+  R->>SA: "Sold" email to the seller
+  Seller->>MCP: mark_shipped, simulate delivery
+  Buyer->>BC: "the desk arrived scratched, keep it for $60 off"
+  BC->>MCP: open_case
+  loop agents negotiate a remedy within the seller's resolution policy
+    BA->>MCP: respond_to_case
+    SA->>MCP: respond_to_case
+  end
+  API->>ST: refund (capped at what was paid)
+  ST->>API: charge.refunded
+  R->>IB: "Resolved" and "Refund issued" emails
+```
+
 ## Built with
 
 - **Claude:** the buyer and seller agents (Claude Code, headless) and the people's assistants (claude.ai, Claude
