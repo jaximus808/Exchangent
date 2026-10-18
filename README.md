@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.svg" alt="Exchangent" width="96" height="96"></p>
+
 # Exchangent
 
 **Your agent buys. Their agent sells. You approve.**
