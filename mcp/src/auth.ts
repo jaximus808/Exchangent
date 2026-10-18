@@ -124,6 +124,54 @@ export function oauthStorage(env: NodeJS.ProcessEnv = process.env): OAuthProxySt
   );
 }
 
+/**
+ * Client ID metadata documents of assistants we know, copied from their public URLs (2026-10-18). claude.ai's
+ * bot protection can answer a cloud server with 403 while serving everyone else, and the proxy then refuses
+ * the sign-in ("Unknown app"). A live 200 always wins; this copy is used only when the live fetch fails.
+ */
+export const PINNED_CLIENT_METADATA: Readonly<Record<string, object>> = {
+  "https://claude.ai/oauth/claude-code-client-metadata": {
+    client_id: "https://claude.ai/oauth/claude-code-client-metadata", client_name: "Claude Code", client_uri: "https://claude.ai",
+    redirect_uris: ["http://localhost/callback", "http://127.0.0.1/callback"],
+    grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none",
+  },
+  "https://claude.ai/oauth/mcp-oauth-client-metadata": {
+    client_id: "https://claude.ai/oauth/mcp-oauth-client-metadata", client_name: "Claude", client_uri: "https://claude.ai",
+    redirect_uris: ["https://claude.ai/api/mcp/auth_callback"],
+    grant_types: ["authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:jwt-bearer"], response_types: ["code"],
+    token_endpoint_auth_method: "none",
+  },
+};
+/** Hosts whose metadata documents may be fetched, plus `EXCHANGENT_CIMD_HOSTS` (comma-separated). */
+export const CIMD_HOSTS = ["claude.ai", "chatgpt.com"] as const;
+
+/**
+ * The proxy's `fetch` (upstream token and `/me` calls, and client metadata documents). A custom fetch turns
+ * off mcp-use's private-address check, so this one only reaches the Exchangent API and token hosts and the
+ * listed assistant hosts, and falls back to {@link PINNED_CLIENT_METADATA} when a known document can't be loaded.
+ */
+export function proxyFetch(env: NodeJS.ProcessEnv = process.env, base: typeof globalThis.fetch = globalThis.fetch): typeof globalThis.fetch {
+  const extra = (env.EXCHANGENT_CIMD_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
+  const allowed = () => new Set([
+    new URL(env.EXCHANGENT_OAUTH_TOKEN_URL?.trim() || DEFAULT_OAUTH_TOKEN_URL).host,
+    new URL(apiBaseUrl()).host, ...CIMD_HOSTS, ...extra,
+  ]);
+  return async (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (!allowed().has(url.host.toLowerCase())) throw new Error(`host ${url.host} is not allowed by the Exchangent proxy`);
+    const pinned = PINNED_CLIENT_METADATA[url.href];
+    if (!pinned) return base(input, init);
+    try {
+      const response = await base(input, init);
+      if (response.status === 200) return response;
+      console.warn(`[exchangent] ${url.href} returned HTTP ${response.status}; using the pinned client metadata`);
+    } catch (error) {
+      console.warn(`[exchangent] ${url.href} failed (${(error as Error).message}); using the pinned client metadata`);
+    }
+    return Response.json(pinned);
+  };
+}
+
 /** Build the `oauth` option for `MCPServer` in oauth mode. Throws with the missing env var names. */
 export function createOAuthProvider(env: NodeJS.ProcessEnv = process.env) {
   const clientId = env.EXCHANGENT_OAUTH_CLIENT_ID?.trim() ?? "";
@@ -155,5 +203,6 @@ export function createOAuthProvider(env: NodeJS.ProcessEnv = process.env) {
     // Required (>= 32 chars) outside a localhost listen(); mcp-use validates it on mount.
     ...(secret ? { secret } : {}),
     mapUser: mapExchangentUser,
+    fetch: proxyFetch(env),
   });
 }
