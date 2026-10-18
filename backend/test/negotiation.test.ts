@@ -103,3 +103,20 @@ test('buyer agent: acts as the delegated request buyer, validates before any loo
  assert.throws(()=>n.need(agent,'buyer'),/forbidden/);
  assert.ok(!keys(sellerView({request:{buyer_email:'h@example.test',title:'t'}})).includes('buyer_email'));
 });
+test('opening total is the first recorded offer and only loaded after buyer access is checked',async()=>{
+ const request='00000000-0000-4000-8000-000000000002',session='00000000-0000-4000-8000-000000000003';
+ const calls:string[]=[];
+ const n=new Negotiation({db:{database:{rpc:async(name)=>{
+  calls.push(name);
+  return {error:null,data:name==='commerce_request_state'?{
+   request_id:request,buyer_id:'buyer',budget_cents:40000,sessions:[{session_id:session,status:'open',seller_name:'Bay Desk Co',seller:{delivery_days:2},current_offer:{version:2,total_cents:36000,is_current:true}}]
+  }:{history:[{type:'offer',total_cents:46500,items:[{floor_cents:19000}]},{type:'counter',total_cents:36000},{type:'offer',total_cents:36000}]}};
+ }}}});
+ await assert.rejects(n.getRequest({scope:'buyer',actor_id:'other'},request),/forbidden/);
+ assert.deepEqual(calls,['commerce_request_state']);
+ const data=await n.getRequest({scope:'buyer',actor_id:'buyer'},request);
+ assert.equal(data.sessions[0].opening_total_cents,46500);
+ assert.ok(!JSON.stringify(data).includes('floor_cents'));
+ const offers=await n.listOffers({scope:'buyer',actor_id:'buyer'},request);
+ assert.equal(offers[0].opening_total_cents,46500);assert.equal(offers[0].delivery_days,2);
+});

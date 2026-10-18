@@ -129,7 +129,7 @@ export const NOT_DELEGATED='The buyer did not delegate negotiation of this reque
 
 export interface NegotiationOptions { db: RpcDb; demoToken?: string; demoBuyerId?: string }
 export type CurrentOffer=OfferJson&{request_id: string; seller_name: string; delivery_days: number; turn: SessionJson['turn'];
- session_version: number; rounds: number; within_budget: boolean};
+ session_version: number; rounds: number; within_budget: boolean; opening_total_cents?: number};
 export class Negotiation {
  db: RpcDb; demoToken?: string; demoBuyerId?: string;
  constructor({db,demoToken,demoBuyerId}: NegotiationOptions) { this.db=db; this.demoToken=demoToken; this.demoBuyerId=demoBuyerId; }
@@ -201,20 +201,31 @@ export class Negotiation {
   return state;
  }
  async getRequest(p: RolePrincipal,requestId: unknown) {
-  const {buyer_id,...state}=await this.requestState(p,requestId);
+  const {buyer_id,...state}=await this.openingTotals(await this.requestState(p,requestId));
   if(p.scope!=='buyer_agent') return buyerView(state);
   // Buyer agent only: the human's email, to tell them a deal is ready to reserve. Null for demo actors.
   const {email}=await this.rpc<DelegatedBuyerEmail>('commerce_delegated_buyer_email',{p_request:state.request_id});
   return {...buyerView(state),buyer_email:email};
  }
  async listOffers(p: RolePrincipal,requestId: unknown) {
-  const state=await this.requestState(p,requestId);
+  const state=await this.openingTotals(await this.requestState(p,requestId));
   // session_version (not the offer's own) is what a counter must send as expected_version.
   return buyerView(state.sessions.filter((s): s is SessionJson&{current_offer: OfferJson}=>!!(s.status==='open'&&s.current_offer?.is_current))
    .map((s): CurrentOffer=>({
    ...s.current_offer,request_id:state.request_id,seller_name:s.seller_name,delivery_days:s.seller.delivery_days,
-   turn:s.turn,session_version:s.version,rounds:s.rounds,within_budget:s.current_offer.total_cents<=state.budget_cents}))
+   turn:s.turn,session_version:s.version,rounds:s.rounds,opening_total_cents:s.opening_total_cents,within_budget:s.current_offer.total_cents<=state.budget_cents}))
    .sort((a,b)=>a.total_cents-b.total_cents));
+ }
+ // Authorized request reads only. Use the first recorded offer, never today's list
+ // price, as the starting total. Do not expose the raw history or private floors.
+ async openingTotals(state: RequestState): Promise<RequestState> {
+  return {...state,sessions:await Promise.all(state.sessions.map(async s=>{
+   if(!s.current_offer) return s;
+   if(s.current_offer.version===1)return {...s,opening_total_cents:s.current_offer.total_cents};
+   const history=await this.rpc<SessionState>('commerce_session_state',{p_session:s.session_id});
+   const opening=history.history.find(h=>h.type==='offer');
+   return {...s,...(opening?{opening_total_cents:opening.total_cents}:{})};
+  }))};
  }
  async counter(p: RolePrincipal,sessionId: unknown,idempotencyKey: unknown,body: unknown) {
   this.need(p,'buyer','buyer_agent'); const b=object(body);

@@ -63,6 +63,15 @@ No responses are cached. The harness listens on loopback port 8787 by default.
 | `POST /api/v1/oauth/authorize` | User session only; issue a single-use authorization code (below) |
 | `POST /api/v1/oauth/token` | OAuth client authentication; RFC 6749 token endpoint (below) |
 
+Negotiation request and offer reads optionally include `opening_total_cents` for
+each seller, taken from its first recorded offer (including delivery and tax),
+after checking request access. This is a historical comparison, not a list price
+or private seller minimum. Offer reads retain the seller's delivery-day estimate.
+Reservation status also includes `request_id`, allowing the client to return to
+current offers after a hold ends. An expired checkout attempt releases only stale
+holds with no attempted Stripe session; ambiguous or bound sessions are preserved
+for payment reconciliation.
+
 Request creation takes:
 
 ```json

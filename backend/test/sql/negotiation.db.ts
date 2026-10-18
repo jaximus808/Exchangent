@@ -179,6 +179,8 @@ test('full negotiation loop through HTTP on real Postgres',async t=>{
   assert.equal((await sql('SELECT count(*)::int AS n FROM commerce_reservations WHERE request_id=$1',[request.request_id]))[0].n,0);
   const r=ok<ReservationRow>(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,{expected_total_cents:36000},key));
   assert.equal(r.total_cents,36000);assert.equal(r.status,'held');
+  const reviewed=ok<{sessions:{session_id:string;opening_total_cents:number}[]}>(await call('GET',`/buy-requests/${request.request_id}`,buyer));
+  assert.equal(reviewed.sessions.find((s: {session_id:string})=>s.session_id===bs)?.opening_total_cents,46500);
   assert.equal(ok<ReservationRow>(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,undefined,key)).id,r.id);
   const stock=ok<InventoryItem[]>(await call('GET','/seller/inventory',bay.token));
   assert.equal(stock.find(i=>i.sku==='BAY-DESK-46')!.available,2);
@@ -235,6 +237,8 @@ test('full negotiation loop through HTTP on real Postgres',async t=>{
   err(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,undefined,randomUUID()),'request_already_reserved',409);
   await sql("UPDATE commerce_reservations SET expires_at=now()+interval '10 minutes' WHERE id=$1",[held.id]);
   err(await call('POST',`/reservations/${held.id}/checkout`,buyer,undefined,randomUUID()),'reservation_expired',409);
+  assert.equal(await desk(),3,'checkout expiry releases only an unattempted hold');
+  assert.equal((await sql('SELECT status FROM commerce_requests WHERE id=$1',[request.request_id]))[0].status,'negotiating');
   const r=ok<ReservationRow>(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,{expected_total_cents:36000},randomUUID()));
   assert.notEqual(r.id,held.id);assert.equal(r.status,'held');
   assert.equal((await sql('SELECT status FROM commerce_reservations WHERE id=$1',[held.id]))[0].status,'expired');

@@ -130,6 +130,7 @@ export interface CounterJson {
  version: number; created_at: string;
 }
 export interface SessionJson {
+ opening_total_cents?: number;
  session_id: string; request_id: string; seller_id: string; seller_name: string;
  seller: { service_area: string; delivery_cents: number; delivery_days: number; agent_handle: string | null };
  status: SessionStatus; turn: Turn; version: number; rounds: number;

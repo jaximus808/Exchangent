@@ -77,3 +77,49 @@ pending, and shows confirmation only for a consumed reservation with a confirmed
 order. Stripe success/cancel pages direct the human back to their conversation;
 neither redirect confirms payment or cancels a hold. The existing verified
 webhook remains the only payment confirmation path. No commission is charged.
+
+## Competition and recovery polish
+
+Buyer panels compare each business's first recorded offer with its current total,
+show delivery estimates and verified item fit, and highlight the lowest eligible
+total. Eligibility excludes expired, superseded and over-budget offers. A seller
+delivery estimate is not a guaranteed delivery date. The progress indicator
+distinguishes negotiation, human approval, payment verification and confirmation.
+
+Deploy the backend before the MCP build: request/offer reads now optionally include
+`opening_total_cents`, and reservation status includes `request_id` so an ended
+checkout can return to the saved request. No new migration is required beyond the
+existing stale-hold migration. When checkout rejects an expired, unattempted hold,
+the backend releases it; attempted or bound Stripe sessions remain protected.
+
+Verified in the local Manufact inspector against disposable Postgres fixtures:
+
+| Scenario | Result |
+| --- | --- |
+| Competing offers, desktop and mobile | Actual opening/current totals, delivery and item fit displayed |
+| Reopen saved reservation | Restores the hold rather than making another reservation |
+| Checkout preparation failure | Hold remains recoverable; retry and refresh actions remain available |
+| Pending payment | Verification message, no second payment button |
+| Reopen confirmed request | Fetches reservation receipt and shows confirmation |
+| Failed payment | Returns to current offers and clears the old checkout state |
+| Expired offers | Review disabled; no lowest-eligible badge |
+| Seller inventory | Stock, list prices and private minimums displayed with business navigation |
+
+These fixtures simulate Stripe events; they do not prove the deployed webhook or
+production ChatGPT/Claude rendering. Recheck the deployed sandbox payment loop and
+both host clients after deployment. Seller OAuth ownership and inventory access
+are also covered by real-Postgres integration tests.
+
+Live seller acceptance passed on the deployed `fast-cloud-tpp4j` connector after
+human consent: `whoami` reported OAuth seller scope for the separate fictional
+Exchangent Seller Test business, and `get_inventory` rendered only its one
+Fictional 46-inch desk (one available, $200 list, $150 private minimum). This
+verifies the existing deployed seller flow; the new panel polish above still
+requires deployment.
+
+Merge handoff: deploy the backend, then both existing Manufact environments with
+this MCP build. The web root and OAuth page on `web-five-jet-34.vercel.app` and
+`exchangent.vercel.app/health` returned HTTP 200 during the final check. The local
+runner credential returned 401 from the deployed backend, so check its current
+credentials before the live agent rehearsal; do not treat site availability as
+proof that negotiation or the deployed Stripe webhook is working end to end.
