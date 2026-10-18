@@ -133,6 +133,40 @@ throwaway container (`test/sql/oauth.db.ts`). That covers registration, consent,
 connector buy and sell routes, refresh rotation, reuse revocation and every failure case. The test
 files run one at a time because they share the demo seed.
 
+## Order confirmation email (Primitive)
+
+After the Stripe webhook confirms an order, the backend emails the buyer one receipt through
+Primitive (`src/order-email.ts`, REST `POST https://api.primitive.dev/v1/send-mail`, docs:
+https://docs.primitive.dev/docs/sending). The email has the seller name, the reserved items,
+subtotal, delivery, tax, total and the order ID: the same numbers as `GET /api/v1/reservations/:id`.
+
+- **Off by default.** It runs only when both `PRIMITIVE_API_KEY` (an organization API key,
+  `prim_...`) and `PRIMITIVE_FROM` (an address on a verified Primitive sending domain, for example
+  `orders@<your-subdomain>.primitive.email`) are set. With one of them missing, it logs
+  `order_email disabled` and does nothing.
+- **Never fails the webhook.** Send errors are logged as `order_email failed order=<id> reason=<code>`
+  (never the address or key). Stripe still gets its 200 response.
+- **At most one email per order.** The `order.confirmed` outbox row is marked delivered after
+  Primitive accepts the send, and is checked before sending. Every attempt uses the
+  `Idempotency-Key` `exchangent-order-confirmed-<order_id>`, which Primitive keeps with no expiry.
+  A failed send leaves the row pending, so Stripe's next retry of the event sends it.
+- The buyer's address is their InsForge account email (`commerce_actors.auth_user_id` →
+  `auth.users.email`). Demo buyers without an account are skipped (`reason=no_recipient`).
+
+To turn it on:
+
+1. Apply `migrations/20261018000300_order-email.sql` to InsForge, after the connector OAuth
+   migration. It adds two RPCs that only `project_admin` can execute. `commerce_order_email` is
+   `SECURITY DEFINER` because it reads `auth.users.email`; `commerce_ack_order_email` marks the row delivered.
+2. In the Primitive dashboard, create an organization API key, and use a sending domain: the managed
+   `*.primitive.email` subdomain works with no DNS setup; a custom domain needs its DNS records verified.
+3. Make sure Primitive lets you send to buyers. New organizations can only send to their own domains,
+   organization members and people who emailed them first. Buyers are arbitrary addresses, so ask Primitive
+   to enable `send_to_any_domain` (check with `curl https://api.primitive.dev/v1/send-permissions -H
+   "Authorization: Bearer $PRIMITIVE_API_KEY"`). Otherwise each send fails with `403 recipient_not_allowed`
+   (logged, the webhook still succeeds).
+4. Set `PRIMITIVE_API_KEY` and `PRIMITIVE_FROM` in Vercel (Production) and in `backend/.env.local`, then redeploy.
+
 ## Remaining integration work
 
 - Port the handlers to the agreed Next.js layout and connect the frontend's
@@ -146,7 +180,8 @@ files run one at a time because they share the demo seed.
   Stripe confirms expiry/failure. Never release based solely on a local timestamp.
   Unbound holds also need a safe cleanup path; ambiguous checkout creation retries
   must use the same Stripe idempotency key before stock can be released.
-- Connect the confirmation outbox to Primitive, with durable delivery retries.
+- Order confirmation emails retry only when Stripe retries the webhook. Add a scheduled sweep of
+  pending `order.confirmed` outbox rows if delivery must survive Stripe giving up.
 - Claim the Stripe sandbox and configure deployed webhook secrets separately.
 
 ## Hackathon credits
@@ -170,7 +205,8 @@ test-mode API: review it with the backend owner before sharing the URL.
 - Environment variables (test keys only): `INSFORGE_URL`, `INSFORGE_API_KEY`,
   `INSFORGE_ANON_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_INTEGRATION_ID`,
   `COMMERCE_BASE_URL=https://<app>.vercel.app`, and `NODEJS_HELPERS=0` so the Stripe
-  webhook receives the raw body. Until they are set, every request returns a 500
+  webhook receives the raw body. Optional: `PRIMITIVE_API_KEY` and `PRIMITIVE_FROM` turn on the
+  order confirmation email (see "Order confirmation email" above). Until they are set, every request returns a 500
   naming the failing check (for example `missing_INSFORGE_URL` or `test_key_required`).
 - Stripe: add a sandbox webhook endpoint `https://<app>.vercel.app/webhooks/stripe`
   for the four checkout events and use its signing secret as `STRIPE_WEBHOOK_SECRET`.

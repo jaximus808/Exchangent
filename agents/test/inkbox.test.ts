@@ -70,6 +70,14 @@ interface FakeSubscription {
 
 type TunnelHandler = (req: Request, ctx: unknown) => Promise<Response>;
 
+interface FakeTask {
+  id: string;
+  contextId: string;
+  state: string;
+  caller: { identityId: string; organizationId: string; handle: string; trustTier: string };
+  messages: Array<{ id: string; messageId: string; role: string; parts: Record<string, unknown>[] }>;
+}
+
 function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
   const org = {
     identities: new Map<string, FakeIdentityRecord>(),
@@ -80,8 +88,12 @@ function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
     sent: [] as SentMessage[],
     replies: [] as Array<{ handle: string; taskId: string; intent: string; text?: string }>,
     enabled: new Set<string>(),
+    /** receiver inbox per handle (a2aTasks / a2aTask) */
+    inbox: new Map<string, FakeTask[]>(),
+    /** tunnels whose serveForever() was called (connect() alone does not open the data plane) */
+    serving: new Set<string>(),
   };
-  const calls = { createIdentity: [] as string[], apiKeys: [] as Array<{ label: string; scopedIdentityId: string }> };
+  const calls = { createIdentity: [] as string[], apiKeys: [] as Array<{ label: string; scopedIdentityId: string }>, cardUrls: [] as string[], emails: [] as Array<{ from: string; to: string[]; subject: string; idempotencyKey?: string }> };
   let n = 0;
 
   const apiError = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
@@ -96,19 +108,53 @@ function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
     get id() { return this.rec.id; }
     get agentHandle() { return this.rec.handle; }
     get tunnel() { return { publicHost: `${this.rec.handle}.inkboxwire.com` }; }
-    async a2aEnable() { org.enabled.add(this.rec.handle); return { enabled: true }; }
-    async a2aReply(taskId: string, opts: { intent: string; text?: string }) { org.replies.push({ handle: this.rec.handle, taskId, ...opts }); return {}; }
-    async *iterA2ATasks() {}
+    // A2ASettings (camelCase, parsed by the SDK); cardUrl is the canonical card URL.
+    async a2aEnable() {
+      org.enabled.add(this.rec.handle);
+      return { enabled: true, publiclyDiscoverable: false, allowPublicEgress: true, filterMode: "whitelist", skills: null, cardUrl: `https://inkbox.ai/a2a/${this.rec.handle}/card`, inboundTaskCount: 0, outboundTaskCount: 0, updatedAt: null };
+    }
+    async sendEmail(opts: { to: string[]; subject: string; bodyText?: string; bodyHtml?: string; idempotencyKey?: string }) {
+      calls.emails.push({ from: this.rec.handle, to: opts.to, subject: opts.subject, idempotencyKey: opts.idempotencyKey });
+      return { id: `msg_${calls.emails.length}` };
+    }
+    async a2aReply(taskId: string, opts: { intent: string; text?: string; parts?: unknown[] }) {
+      if ((opts.text === undefined) === (opts.parts === undefined)) throw new TypeError("Pass exactly one of text or parts");
+      org.replies.push({ handle: this.rec.handle, taskId, ...opts });
+      const task = (org.inbox.get(this.rec.handle) || []).find((t) => t.id === taskId);
+      if (task) task.state = opts.intent === "complete" ? "completed" : task.state;
+      return task;
+    }
+    async *iterA2ATasks({ state }: { state?: string } = {}) {
+      for (const t of org.inbox.get(this.rec.handle) || []) if (!state || t.state === state) yield t;
+    }
+    async a2aTask(taskId: string) {
+      const task = (org.inbox.get(this.rec.handle) || []).find((t) => t.id === taskId);
+      if (!task) throw apiError(404, "task not found");
+      return task;
+    }
     async a2aClient() {
+      // The real SDK checks whoami: authSubtype "api_key.agent_scoped.claimed" and scope "agent_identity:<id>".
       const scoped = org.keys.get(this.apiKey);
       if (scoped !== this.rec.id) throw new Error("A2A calls require this claimed identity's agent-scoped API key");
       const fromHandle = this.rec.handle;
+      const fromId = this.rec.id;
       return {
-        fetchCard: async (url: string) => ({ url, handle: url.match(/\/a2a\/([^/]+)\/card$/)![1] }),
-        send: async (target: { handle: string }, opts: { messageId?: string; contextId?: string; parts: A2AEventParts }) => {
+        // A2AResolvedTarget: { cardUrl, rpcUrl, protocolVersion, card }
+        fetchCard: async (cardUrl: string) => {
+          calls.cardUrls.push(cardUrl);
+          const handle = cardUrl.match(/^https:\/\/inkbox\.ai\/a2a\/([^/]+)\/card$/)![1];
+          const rpcUrl = `https://inkbox.ai/a2a/${handle}`;
+          return { cardUrl, rpcUrl, protocolVersion: "1.0", card: { name: `@${handle}`, supportedInterfaces: [{ url: rpcUrl, protocolBinding: "JSONRPC", protocolVersion: "1.0" }] } };
+        },
+        // A2ASendResult: { kind: "task", task: A2AWireTask } (Inkbox workers always return a task)
+        send: async (target: { rpcUrl: string }, opts: { messageId?: string; contextId?: string; parts: A2AEventParts }) => {
+          const to = target.rpcUrl.split("/").pop()!;
           const contextId = opts.contextId || `ctx-${++n}`;
-          const task = { id: `task-${++n}`, contextId, status: { state: "submitted" } };
-          org.sent.push({ from: fromHandle, to: target.handle, ...opts, taskId: task.id });
+          const task = { id: `task-${++n}`, contextId, status: { state: "TASK_STATE_SUBMITTED" } };
+          org.sent.push({ from: fromHandle, to, ...opts, taskId: task.id });
+          const inbox = org.inbox.get(to) || [];
+          inbox.push({ id: task.id, contextId, state: "submitted", caller: { identityId: fromId, organizationId: "org", handle: fromHandle, trustTier: "organization" }, messages: [{ id: `m-${n}`, messageId: opts.messageId || "", role: "caller", parts: opts.parts }] });
+          org.inbox.set(to, inbox);
           return { kind: "task", task };
         },
       };
@@ -120,7 +166,7 @@ function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
     apiKeys: { create(o: { label: string; scopedIdentityId: string }): Promise<{ apiKey: string; record: { id: string; scopedIdentityId: string } }> };
     webhooks: {
       subscriptions: {
-        list(o: { agentIdentityId: string; url: string }): Promise<FakeSubscription[]>;
+        list(o: { agentIdentityId: string; url: string; scope?: "identity" }): Promise<FakeSubscription[]>;
         create(o: { agentIdentityId: string; url: string; eventTypes: string[] }): Promise<FakeSubscription & { signingKey: string | null }>;
       };
     };
@@ -175,9 +221,28 @@ function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
     }
   }
 
-  async function connect(_inkbox: unknown, { name, handler }: { name: string; handler: TunnelHandler }) {
-    org.tunnels.set(name, handler);
-    return { publicUrl: `https://${name}.inkboxwire.com`, close: async () => org.tunnels.delete(name), wait: async () => {} };
+  // Like the real connect(): bootstrap only. The tunnel receives traffic once serveForever() runs, which reports
+  // "connecting" then "connected" through onStatus and resolves on close().
+  async function connect(_inkbox: unknown, { name, handler, onStatus }: { name: string; handler: TunnelHandler; onStatus?: (s: string) => void }) {
+    let stop: () => void = () => {};
+    const stopped = new Promise<void>((resolve) => { stop = resolve; });
+    let status = "idle";
+    const setStatus = (s: string) => { status = s; onStatus?.(s); };
+    const listener = {
+      publicUrl: `https://${name}.inkboxwire.com`,
+      get status() { return status; },
+      get isConnected() { return status === "connected"; },
+      serveForever: async () => {
+        setStatus("connecting");
+        org.serving.add(name);
+        org.tunnels.set(name, handler);
+        setStatus("connected");
+        await stopped;
+      },
+      wait: async () => listener.serveForever(),
+      close: async () => { org.tunnels.delete(name); org.serving.delete(name); setStatus("closed"); stop(); },
+    };
+    return listener;
   }
 
   /** Act as Inkbox: deliver the last sent A2A message to the recipient's tunnel as a signed webhook. */
@@ -187,7 +252,15 @@ function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
       id: webhookId,
       event_type: "a2a.task.created",
       timestamp: new Date().toISOString(),
-      data: { task_id: sent.taskId, context_id: sent.contextId || "ctx", state: "submitted", caller: { identity_id: "x", organization_id: "org", handle: sent.from }, message_id: sent.messageId, parts: sent.parts },
+      data: {
+        task_id: sent.taskId,
+        context_id: sent.contextId || "ctx",
+        state: "submitted",
+        caller: { identity_id: "x", organization_id: "org", handle: sent.from },
+        sender: { identity_id: "x", organization_id: "org", handle: sent.from },
+        message_id: sent.messageId,
+        parts: sent.parts,
+      },
     });
     const headers = sign({ body, secret: secretOverride || org.signingKeys.get(target!.id)! });
     const req = new Request(`https://${sent.to}.inkboxwire.com${WEBHOOK_PATH}`, { method: "POST", headers, body });
@@ -248,6 +321,8 @@ test("send: identities on demand, agent-scoped keys, registration, A2A message s
     ],
   );
   assert.ok(fake.org.tunnels.has("exchangent-buyer") && fake.org.tunnels.has("exchangent-acme-desks"), "tunnels online");
+  assert.deepEqual([...fake.org.serving].sort(), ["exchangent-acme-desks", "exchangent-buyer"], "serveForever() started for each tunnel");
+  assert.deepEqual(fake.calls.cardUrls, ["https://inkbox.ai/a2a/exchangent-acme-desks/card"], "card URL from the A2A settings");
 
   const [s1] = fake.org.sent;
   assert.equal(s1.from, "exchangent-buyer", "sent from the counterparty's identity");
@@ -356,4 +431,52 @@ test("eventParts never includes notes in the data part and keeps the text short"
   const parts = eventParts(acme, { id: "e1", kind: "offer.created", created_at: "t", payload: { session_id: "s", offer_id: "o", total_cents: 100, note: "x".repeat(500) } });
   assert.equal((parts[0].data as Record<string, unknown>).note, undefined);
   assert.ok(parts[1].text.length < 260);
+});
+
+test("no sender (a person's order): seller gets the event in-process, Inkbox is never called", async () => {
+  const { transport, fake } = makeTransport();
+  const got: string[] = [];
+  transport.onMessage(acme, (m) => got.push(m.id));
+  const ev = opened("s-acme");
+  await transport.send(null, acme, ev);
+  assert.deepEqual(got, [ev.id]);
+  assert.deepEqual(fake.calls.createIdentity, []);
+  assert.equal(fake.org.sent.length, 0);
+  await assert.rejects(transport.send(null, buyer, ev), /cannot tell which seller/);
+});
+
+test("restart: tasks still submitted in the inbox are replayed to the agent and completed", async () => {
+  const first = makeTransport();
+  const ev = opened("s-acme", "sess-r");
+  await first.transport.send(buyer, acme, ev); // nobody delivers the webhook: the task stays "submitted"
+  await first.transport.close();
+
+  const second = new InkboxTransport({ apiKey: "admin-key", identityCap: 3, stateDir: first.stateDir, backend: { registerSellerAgent: async () => {} }, sdk: first.fake.sdk });
+  const got: TransportMessage[] = [];
+  second.onMessage(acme, (m) => got.push(m));
+  await second.start([buyer, acme]);
+  assert.deepEqual(got.map((m) => [m.id, m.from, m.payload.session_id]), [[ev.id, "buyer", "sess-r"]]);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(first.fake.org.replies.map((r) => [r.handle, r.intent]), [["exchangent-acme-desks", "complete"]]);
+  assert.equal(first.fake.calls.createIdentity.length, 2, "identities reused from state");
+  await second.close();
+});
+
+test("receive: our own reply echoed as a2a.task.message (sender = us) is ignored", async () => {
+  const { transport, fake } = makeTransport();
+  const got: TransportMessage[] = [];
+  transport.onMessage(acme, (m) => got.push(m));
+  await transport.send(buyer, acme, opened("s-acme"));
+  const sent = fake.org.sent[0];
+  const res = await fake.deliver({ ...sent, from: "exchangent-acme-desks" });
+  assert.equal(await res.text(), "ignored");
+  assert.equal(got.length, 0);
+  await transport.close();
+});
+
+test("email: sent from the agent's own identity mailbox with the idempotency key", async () => {
+  const { transport, fake } = makeTransport();
+  await transport.email(buyer, { to: ["person@example.com"], subject: "Deal reached", text: "t", html: "<p>t</p>", idempotencyKey: "exchangent-deal-r1" });
+  assert.deepEqual(fake.calls.emails, [{ from: "exchangent-buyer", to: ["person@example.com"], subject: "Deal reached", idempotencyKey: "exchangent-deal-r1" }]);
+  await transport.close();
 });

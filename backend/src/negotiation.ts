@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { CommerceError } from './commerce.ts';
 import type {
- AgentHandle, ApiError, CreatedCounter, CreatedOffer, CreatedRequest, DbError, DeclinedSession, ErrorCode, EventAck,
+ AgentHandle, ApiError, CreatedCounter, CreatedOffer, CreatedRequest, DbError, DeclinedSession, DelegatedBuyer, DelegatedBuyerEmail, ErrorCode, EventAck,
  InventoryItem, OfferJson, Requirements, RequestState, RoleScope, RolePrincipal, RpcDb, SellerSession, SessionJson,
  SessionState, WorkerEvent,
 } from './types.ts';
@@ -22,7 +22,7 @@ export const hashToken=(token: string)=>createHash('sha256').update(token,'utf8'
 
 // Next step for an agent or human, keyed by error code. Read by the MCP layer as `next`.
 export const NEXT_ACTIONS: Partial<Record<ErrorCode,string>>={
- unauthorized:'Send Authorization: Bearer <token> for a buyer, seller or worker principal.',
+ unauthorized:'Send Authorization: Bearer <token> for a buyer, buyer agent, seller or worker principal.',
  forbidden:'This principal cannot act on that resource. Use IDs returned by your own list or get calls.',
  not_found:'Check the ID or path. List your requests or sessions to find valid IDs.',
  session_not_found:'Check the session ID. Buyers: call get_buy_order; sellers: call list_my_requests.',
@@ -71,7 +71,7 @@ export function errorBody(error: unknown): {status: number; body: {error: ApiErr
 
 // Redaction: allowlisted shapes come from SQL; these keys are additionally stripped at any depth.
 const HIDDEN={buyer:['floor_cents','agent_handle','idempotency_key'],
- seller:['budget_cents','target_cents','buyer_id','agent_handle','idempotency_key'],worker:[]} as const;
+ seller:['budget_cents','target_cents','buyer_id','buyer_email','agent_handle','idempotency_key'],worker:[]} as const;
 /** T with keys K removed at any depth (the static shape of `strip`). */
 export type Redacted<T,K extends PropertyKey>=T extends readonly (infer U)[]?Redacted<U,K>[]
  :T extends object?{[P in keyof T as P extends K?never:P]:Redacted<T[P],K>}:T;
@@ -124,6 +124,9 @@ export function validateRequirements(r: unknown): Requirements {
  return r as Requirements;
 }
 
+// The platform buyer agent may act only on requests whose buyer left delegate_negotiation on.
+export const NOT_DELEGATED='The buyer did not delegate negotiation of this request to the buyer agent; only the buyer can act on it.';
+
 export interface NegotiationOptions { db: RpcDb; demoToken?: string; demoBuyerId?: string }
 export type CurrentOffer=OfferJson&{request_id: string; seller_name: string; delivery_days: number; turn: SessionJson['turn'];
  session_version: number; rounds: number; within_budget: boolean};
@@ -154,6 +157,25 @@ export class Negotiation {
  need(p: RolePrincipal,...scopes: RoleScope[]) {
   if(!scopes.includes(p.scope)) throw fail('forbidden',`Requires ${scopes.join(' or ')} scope; this token has ${p.scope} scope`);
  }
+ /**
+  * The buyer a buyer-side principal acts as. A buyer is itself (the RPCs check ownership).
+  * The platform buyer agent acts as the request's buyer, only if that request delegated
+  * negotiation: otherwise 403 forbidden, as for a buyer touching someone else's request.
+  */
+ async actingBuyer(p: RolePrincipal,target: {request?: string; session?: string}) {
+  if(p.scope!=='buyer_agent') return p.actor_id;
+  try {
+   return (await this.rpc<DelegatedBuyer>('commerce_delegated_buyer',{p_request:target.request??null,p_session:target.session??null})).buyer_id;
+  } catch(e) {
+   if(e instanceof CommerceError&&e.code==='forbidden') throw fail('forbidden',NOT_DELEGATED);
+   throw e;
+  }
+ }
+ /** Buyer-side read access: the buyer's own request, or any delegated request for the buyer agent. */
+ canRead(p: RolePrincipal,request: {buyer_id: string; delegate_negotiation: boolean}) {
+  if(p.scope==='buyer_agent') {if(!request.delegate_negotiation) throw fail('forbidden',NOT_DELEGATED);}
+  else if(request.buyer_id!==p.actor_id) throw fail('forbidden');
+ }
  whoami(p: RolePrincipal) {
   if(p.kind==='connector') return {kind:'connector' as const,scope:p.scope,actor_id:p.actor_id,seller_id:p.seller_id??null,client_id:p.client_id??null};
   return {scope:p.scope,actor_id:p.actor_id,seller_id:p.seller_id??null,label:p.label};
@@ -172,15 +194,18 @@ export class Negotiation {
    p_deadline:b.deadline??null,p_delegate:b.delegate_negotiation??true});
  }
  async requestState(p: RolePrincipal,requestId: unknown) {
-  this.need(p,'buyer');
+  this.need(p,'buyer','buyer_agent');
   const state=await this.rpc<RequestState | null>('commerce_request_state',{p_request:id(requestId)});
   if(!state) throw fail('request_not_found');
-  if(state.buyer_id!==p.actor_id) throw fail('forbidden');
+  this.canRead(p,state);
   return state;
  }
  async getRequest(p: RolePrincipal,requestId: unknown) {
   const {buyer_id,...state}=await this.requestState(p,requestId);
-  return buyerView(state);
+  if(p.scope!=='buyer_agent') return buyerView(state);
+  // Buyer agent only: the human's email, to tell them a deal is ready to reserve. Null for demo actors.
+  const {email}=await this.rpc<DelegatedBuyerEmail>('commerce_delegated_buyer_email',{p_request:state.request_id});
+  return {...buyerView(state),buyer_email:email};
  }
  async listOffers(p: RolePrincipal,requestId: unknown) {
   const state=await this.requestState(p,requestId);
@@ -192,28 +217,34 @@ export class Negotiation {
    .sort((a,b)=>a.total_cents-b.total_cents));
  }
  async counter(p: RolePrincipal,sessionId: unknown,idempotencyKey: unknown,body: unknown) {
-  this.need(p,'buyer'); const b=object(body);
-  return this.rpc<CreatedCounter>('commerce_buyer_counter',{p_buyer:p.actor_id,p_session:id(sessionId),p_key:key(idempotencyKey),
+  this.need(p,'buyer','buyer_agent'); const b=object(body);
+  const args={p_session:id(sessionId),p_key:key(idempotencyKey),
    p_expected_version:int(b.expected_version,'expected_version'),p_total_cents:int(b.total_cents,'total_cents',{min:1}),
-   p_note:text(b.note,'note',2000)});
+   p_note:text(b.note,'note',2000)};
+  // Validated before any lookup; the buyer agent's counter is the buyer's (same budget, same keys).
+  return this.rpc<CreatedCounter>('commerce_buyer_counter',{p_buyer:await this.actingBuyer(p,{session:args.p_session}),...args});
  }
 
- // Buyer or seller
+ // Buyer (or the buyer agent) or seller
  async getSession(p: RolePrincipal,sessionId: unknown) {
-  this.need(p,'buyer','seller');
+  this.need(p,'buyer','buyer_agent','seller');
   const state=await this.rpc<SessionState | null>('commerce_session_state',{p_session:id(sessionId)});
   if(!state) throw fail('session_not_found');
   if(p.scope==='seller') {
    if(state.seller_id!==p.seller_id) throw fail('forbidden');
    return {role:'seller' as const,...sellerView(state)};
   }
-  if(state.request.buyer_id!==p.actor_id) throw fail('forbidden');
+  this.canRead(p,state.request);
   return {role:'buyer' as const,...buyerView(state)};
  }
  async decline(p: RolePrincipal,sessionId: unknown,idempotencyKey: unknown,body: unknown) {
-  this.need(p,'buyer','seller'); key(idempotencyKey); const b=object(body);
+  this.need(p,'buyer','buyer_agent','seller'); key(idempotencyKey); const b=object(body);
+  const session=id(sessionId),reason=text(b.reason,'reason',500);
+  // The buyer agent declines as the request's buyer.
+  if(p.scope==='buyer_agent') return this.rpc<DeclinedSession>('commerce_decline_session',{
+   p_actor:await this.actingBuyer(p,{session}),p_scope:'buyer',p_seller:null,p_session:session,p_reason:reason});
   return this.rpc<DeclinedSession>('commerce_decline_session',{p_actor:p.actor_id,p_scope:p.scope,p_seller:p.seller_id??null,
-   p_session:id(sessionId),p_reason:text(b.reason,'reason',500)});
+   p_session:session,p_reason:reason});
  }
 
  // Seller

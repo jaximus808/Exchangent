@@ -1,6 +1,8 @@
 import Stripe from 'stripe';
 import { createAdminClient } from '@insforge/sdk';
 import type { InsForgeClient } from '@insforge/sdk';
+import { orderEmailFromEnv } from './order-email.ts';
+import type { OrderEmail } from './order-email.ts';
 import type { Db, DbTable, ErrorCode, OfferRow, OrderSummary, PaymentResult, ReservationRow, SellerRow } from './types.ts';
 
 export class CommerceError extends Error {
@@ -36,12 +38,17 @@ export interface ReservationStatusView {
   seller: Pick<SellerRow,'id'|'name'>; items: ReceiptItem[]; subtotal_cents: number;
   delivery_cents: number; tax_cents: number; expires_at: string; order: OrderSummary | null;
 }
-export interface CommerceOptions { db: Db; stripe: Stripe; webhookSecret: string; baseUrl: string; integrationId: string }
+export interface CommerceOptions {
+  db: Db; stripe: Stripe; webhookSecret: string; baseUrl: string; integrationId: string;
+  /** Order confirmation email; undefined when Primitive is not configured. */
+  orderEmail?: Pick<OrderEmail,'deliver'>;
+}
 export class Commerce {
   db: Db; stripe: Stripe; webhookSecret: string; baseUrl: string; integrationId: string;
-  constructor({ db, stripe, webhookSecret, baseUrl, integrationId }: CommerceOptions) {
+  orderEmail?: Pick<OrderEmail,'deliver'>;
+  constructor({ db, stripe, webhookSecret, baseUrl, integrationId, orderEmail }: CommerceOptions) {
     this.db=db; this.stripe=stripe; this.webhookSecret=webhookSecret;
-    this.baseUrl=baseUrl; this.integrationId=integrationId;
+    this.baseUrl=baseUrl; this.integrationId=integrationId; this.orderEmail=orderEmail;
   }
   // RPC results are jsonb built by our own SQL functions (migrations/); callers name the shape.
   async rpc<T = unknown>(name: string, args: Record<string, unknown>): Promise<T> {
@@ -59,8 +66,18 @@ export class Commerce {
     if(typeof key!=='string'||key.length<1||key.length>200) throw new CommerceError('idempotency_key_required',400);
     if(expectedTotal!==undefined && (typeof expectedTotal!=='number'||!Number.isSafeInteger(expectedTotal)||expectedTotal<=0||expectedTotal>2147483647))
       throw new CommerceError('invalid_input',400);
-    return this.rpc<ReservationRow>('commerce_reserve',{p_buyer:buyer,p_offer:offer,p_key:key,
-      ...(expectedTotal!==undefined?{p_expected_total:expectedTotal}:{})});
+    return this.releaseStaleHolds().then(()=>this.rpc<ReservationRow>('commerce_reserve',{p_buyer:buyer,p_offer:offer,p_key:key,
+      ...(expectedTotal!==undefined?{p_expected_total:expectedTotal}:{})}));
+  }
+  /**
+   * Free holds that can no longer open checkout, so they don't block a new reservation or keep stock.
+   * Best effort: a failure (e.g. the migration is not applied yet) must not block reserving.
+   */
+  async releaseStaleHolds(): Promise<void> {
+    try {
+      const {error}=await this.db.database.rpc('commerce_release_stale_holds',{});
+      if(error) console.error(`release_stale_holds failed: ${error.message}`);
+    } catch(e) {console.error(`release_stale_holds failed: ${(e as Error).message}`);}
   }
   async checkout(buyer: string, id: string): Promise<CheckoutLink> {
     const r=await this.rpc<ReservationRow>('commerce_begin_checkout',{p_buyer:buyer,p_reservation:id});
@@ -92,13 +109,34 @@ export class Commerce {
     if(!id) throw new CommerceError('reservation_binding_missing',400);
     const r=await this.row<ReservationRow>('commerce_reservations',id);
     validateSession(session,r);
-    return this.rpc<PaymentResult>('commerce_apply_payment',{
+    const result=await this.rpc<PaymentResult>('commerce_apply_payment',{
       p_event:event.id,p_type:event.type,p_reservation:r.id,p_session:session.id,
       p_total:session.amount_total,p_currency:session.currency,
       p_paid:session.payment_status==='paid',
       p_release:session.status==='expired' || (event.type==='checkout.session.async_payment_failed' && session.payment_status==='unpaid'),
       p_pending:session.status==='complete' && session.payment_status==='unpaid',
     });
+    if(session.payment_status==='paid') await this.confirmationEmail(r.id,result);
+    return result;
+  }
+  /**
+   * Sends the buyer's order confirmation once (src/order-email.ts). Never throws, so the
+   * payment response to Stripe is unaffected. A retried Stripe event comes back as a
+   * duplicate without order_id; the order is looked up so a failed first send can be retried.
+   */
+  async confirmationEmail(reservationId: string, result: PaymentResult) {
+    if(!this.orderEmail) return;
+    try {
+      let orderId=result.order_id??null;
+      if(!orderId && result.duplicate) {
+        const {data,error}=await this.db.database.from('commerce_orders').select('id').eq('reservation_id',reservationId).limit(1);
+        if(error) throw new CommerceError('database_error',503);
+        orderId=(data?.[0] as {id?: string} | undefined)?.id??null;
+      }
+      if(orderId) await this.orderEmail.deliver(orderId,(reservation,buyer)=>this.status(buyer,reservation));
+    } catch(error) {
+      console.error(`order_email failed reservation=${reservationId} reason=${error instanceof CommerceError?error.code:'error'}`);
+    }
   }
   async status(buyer: string, id: string): Promise<ReservationStatusView> {
     const r=await this.row<ReservationRow>('commerce_reservations',id);
@@ -135,7 +173,7 @@ export function fromEnv(env: NodeJS.ProcessEnv = process.env) {
   const url=new URL(baseUrl);
   if(url.protocol!=='https:' && !['127.0.0.1','localhost'].includes(url.hostname)) throw new CommerceError('https_required',500);
   // Non-null assertions: each variable was checked by assertTestKey or the loop above.
-  return new Commerce({db:asDb(createAdminClient({baseUrl:env.INSFORGE_URL,apiKey:env.INSFORGE_API_KEY!})),
-    stripe:new Stripe(env.STRIPE_SECRET_KEY!),webhookSecret:env.STRIPE_WEBHOOK_SECRET!,
-    baseUrl,integrationId:env.STRIPE_INTEGRATION_ID!});
+  const db=asDb(createAdminClient({baseUrl:env.INSFORGE_URL,apiKey:env.INSFORGE_API_KEY!}));
+  return new Commerce({db,stripe:new Stripe(env.STRIPE_SECRET_KEY!),webhookSecret:env.STRIPE_WEBHOOK_SECRET!,
+    baseUrl,integrationId:env.STRIPE_INTEGRATION_ID!,orderEmail:orderEmailFromEnv(db,env)});
 }

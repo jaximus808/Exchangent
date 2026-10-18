@@ -26,8 +26,9 @@ coverage/
 .trae
 .windsurf
 
-# Demo bearer tokens written by backend seed:negotiation
+# Demo bearer tokens written by backend seed:negotiation and agents:tokens
 .demo-principals.json
+.agent-principals.json
 
 # Local MCP telemetry state
 .mcp-use/

@@ -77,8 +77,10 @@ export type Principal = UserPrincipal | DelegationPrincipal;
 /**
  * Negotiation-route principal: a seeded 64-hex role token (commerce_resolve_principal) or an
  * `exc_` connector access token from the OAuth flow (commerce_resolve_connector, kind 'connector').
+ * `buyer_agent` is the platform buyer agent (scripts/agent-tokens.ts): it acts as the buyer of
+ * any request with delegate_negotiation on, for reads, counters and declines only.
  */
-export type RoleScope = 'buyer' | 'seller' | 'worker';
+export type RoleScope = 'buyer' | 'buyer_agent' | 'seller' | 'worker';
 export interface RolePrincipal {
  scope: RoleScope; actor_id: string; seller_id?: string | null; label?: string;
  kind?: 'connector'; client_id?: string;
@@ -159,6 +161,10 @@ export interface CreatedRequest { request_id: string; status: RequestStatus; ses
 export interface CreatedOffer { offer_id: string; version: number; total_cents: number; session_version: number }
 export interface CreatedCounter { counter_id: string; session_version: number }
 export interface DeclinedSession { session_id: string; status: SessionStatus; session_version: number }
+/** commerce_delegated_buyer: the buyer a buyer_agent principal acts for. */
+export interface DelegatedBuyer { request_id: string; buyer_id: string }
+/** commerce_delegated_buyer_email: the buyer's InsForge email (buyer agent only); null for demo actors. */
+export interface DelegatedBuyerEmail { request_id: string; email: string | null }
 
 // ---------- Outbox (worker feed) ----------
 export type OutboxKind = 'session.opened' | 'offer.created' | 'counter.created' | 'session.declined';
@@ -170,7 +176,9 @@ export interface OutboxPayloads {
 }
 export type WorkerEvent = { [K in OutboxKind]: {
  id: string; kind: K; created_at: string; payload: OutboxPayloads[K];
- route: { to_role: Turn; request_id?: string; seller_id?: string; buyer_id?: string; agent_handle?: string };
+ route: { to_role: Turn; request_id?: string; seller_id?: string; buyer_id?: string; agent_handle?: string;
+  /** The request's delegate_negotiation: the platform buyer agent negotiates it. */
+  delegated: boolean };
 } }[OutboxKind];
 export interface EventAck { id: string; kind: OutboxKind; delivered_at: string }
 export interface AgentHandle { seller_id: string; agent_handle: string }

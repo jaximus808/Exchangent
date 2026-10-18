@@ -2,6 +2,7 @@ import { toMessage } from "./index.ts";
 import type { MessageHandler, Transport } from "./index.ts";
 import type { Agent } from "../agents.ts";
 import type { WorkerEvent } from "../backend.ts";
+import type { EmailMessage } from "../notify.ts";
 import { logger } from "../log.ts";
 
 const log = logger("transport:local");
@@ -23,6 +24,10 @@ export class LocalTransport implements Transport {
     const msg = toMessage(fromAgent, event);
     log.info("delivered", { from: fromAgent?.id, to: toAgent.id, kind: event.kind, event: event.id });
     await handler(msg);
+  }
+
+  async email(from: Agent, message: EmailMessage): Promise<void> {
+    log.info("email (local transport: not sent)", { from: from.id, subject: message.subject });
   }
 
   async close(): Promise<void> {}
