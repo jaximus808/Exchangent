@@ -277,3 +277,24 @@ describe("oauth helpers", () => {
     assert.doesNotThrow(() => oauthStorage({ MCP_URL: "https://mcp.example.com", UPSTASH_REDIS_REST_URL: "https://x.upstash.io", UPSTASH_REDIS_REST_TOKEN: "t" }));
   });
 });
+
+test("proxyFetch: pinned client metadata when claude.ai refuses the server, and a host allowlist", async () => {
+  const { proxyFetch, PINNED_CLIENT_METADATA } = await import("../src/auth.ts");
+  const doc = "https://claude.ai/oauth/claude-code-client-metadata";
+  let status = 403;
+  const calls: string[] = [];
+  const base = (async (input: string | URL | Request) => {
+    calls.push(String(input));
+    return new Response(status === 200 ? JSON.stringify({ client_id: doc, live: true }) : "<html>blocked</html>", { status });
+  }) as typeof fetch;
+  const f = proxyFetch({ EXCHANGENT_OAUTH_TOKEN_URL: "https://exchangent.vercel.app/api/v1/oauth/token" }, base);
+  assert.deepEqual(await (await f(doc)).json(), PINNED_CLIENT_METADATA[doc], "403 falls back to the pinned copy");
+  status = 200;
+  assert.equal(((await (await f(doc)).json()) as { live?: boolean }).live, true, "a live 200 wins");
+  status = 403;
+  assert.equal((await f("https://claude.ai/oauth/unknown-client")).status, 403, "unknown documents are not invented");
+  assert.equal((await f("https://exchangent.vercel.app/api/v1/oauth/token")).status, 403, "upstream calls pass through");
+  await assert.rejects(f("http://169.254.169.254/latest/meta-data"), /not allowed/);
+  await assert.rejects(f("https://evil.example/client.json"), /not allowed/);
+  assert.equal(calls.length, 4);
+});
