@@ -21,7 +21,11 @@ export type AuthorizeResult=
 
 const commerceBase=()=>(process.env.COMMERCE_API_URL??'http://127.0.0.1:8787').replace(/\/+$/,'');
 
-/** The InsForge session token, read from the httpOnly cookie on the server. Never accepted from the client. */
+/**
+ * The InsForge session token, read from the session cookie on the server. Never accepted from the client.
+ * Note: the InsForge SDK sets this cookie without httpOnly, so page scripts could read it; nothing here relies on
+ * it being httpOnly, and the app renders no untrusted HTML.
+ */
 export async function sessionToken():Promise<string|null> {
  const value=(await cookies()).get('insforge_access_token')?.value;
  return value&&value.length<8192?value:null;

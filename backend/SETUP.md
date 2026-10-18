@@ -44,7 +44,7 @@ project and set its own secrets; `backend/.env.example` lists names only.
 npm ci --prefix backend
 npm run typecheck --prefix backend
 npm test --prefix backend
-stripe listen --forward-to http://127.0.0.1:8787/webhooks/stripe --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired
+stripe listen --forward-to http://127.0.0.1:8787/webhooks/stripe --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired,charge.dispute.created,charge.dispute.updated,charge.dispute.closed,charge.refunded
 ```
 
 Save that listener's signing secret as `STRIPE_WEBHOOK_SECRET` in
@@ -225,4 +225,8 @@ test-mode API: review it with the backend owner before sharing the URL.
   naming the failing check (for example `missing_INSFORGE_URL` or `test_key_required`).
 - Stripe: add a sandbox webhook endpoint `https://<app>.vercel.app/webhooks/stripe`
   for the four checkout events and use its signing secret as `STRIPE_WEBHOOK_SECRET`.
+  Resolution (migration 0900) also needs `charge.dispute.created`, `charge.dispute.updated`,
+  `charge.dispute.closed` and `charge.refunded` on the same endpoint: disputes are answered
+  automatically, and refunds accepted as pending are settled by `charge.refunded`. Without them,
+  refunds still work (most card refunds succeed at once) but chargebacks go unanswered.
 - Check: `curl https://<app>.vercel.app/health` returns `{"status":"ok","mode":"test"}`.

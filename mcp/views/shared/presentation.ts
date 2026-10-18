@@ -46,6 +46,7 @@ export function progressFor(data:Payload) {
  if(payment==='confirmed')return {step:3,title:'Order confirmed',detail:'Payment verified. Your order is saved.'};
  if(payment==='ended')return {step:2,title:'Reservation ended',detail:'Refresh your request to see current offers.'};
  if(payment==='verifying')return {step:3,title:'Verifying payment',detail:'You do not need to pay again.'};
+ if(data.request_status==='expired')return {step:1,title:'Request expired',detail:'The delivery deadline passed before a deal was reached. Ask your assistant to place a new request.'};
  if(data.reservation_id||data.reservation)return {step:2,title:'Waiting for your approval',detail:'Your items are held. Payment happens in Stripe.'};
  const offers=offersFor(data);
  if(offers.some(o=>canReview(o,data.budget_cents)))return {step:2,title:'Offers ready to review',detail:'Compare the terms. You decide whether to buy.'};

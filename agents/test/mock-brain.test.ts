@@ -52,7 +52,7 @@ test("buyer: target first, split the difference, accept <= budget only after rou
   assert.equal(decideBuyer(order(2, 37000, 34000), "s").action, "counter", "within budget but before round 3: keep negotiating");
   assert.equal(decideBuyer(order(3, 37000, 35500), "s").action, "ready", "after round 3 anything within budget is acceptable");
   assert.equal(decideBuyer(order(1, 27500, 28000), "s").action, "ready", "at or under target");
-  assert.equal(decideBuyer(order(5, 45000, 37900), "s").totalCents, 38000, "never counters above budget");
+  assert.equal(decideBuyer(order(5, 45000, 37900), "s").totalCents, 36860, "never counters above 97% of the budget");
 });
 
 test("parseToolResult: structuredContent, JSON text, isError", () => {

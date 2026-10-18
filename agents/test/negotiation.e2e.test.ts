@@ -69,7 +69,8 @@ test("local transport + mock brain negotiate to 'ready to reserve'", async (t) =
   ].sort((a, b) => a.at - b.at);
 
   // session.opened -> list (desk 25000 + ergonomic chair 15000 + delivery 2000), buyer counters at target,
-  // seller concedes 5% per item, buyer splits the difference, seller meets the counter (>= floor minimum 30000).
+  // seller concedes 5% per item, buyer splits the difference. The counter clears the floor minimum (30000), but
+  // before round 3 the seller only meets halfway (doc/hardening-contract.md); at round 3 that is within budget.
   assert.deepEqual(
     timeline.map((x) => [x.who, x.total]),
     [
@@ -77,7 +78,7 @@ test("local transport + mock brain negotiate to 'ready to reserve'", async (t) =
       ["buyer", 28000],
       ["seller", 40000],
       ["buyer", 34000],
-      ["seller", 34000],
+      ["seller", 37000],
     ],
   );
   // Requirements respected: the 46in desk (not the cheaper 60in) and the ergonomic chair (not the stool).
@@ -93,7 +94,7 @@ test("local transport + mock brain negotiate to 'ready to reserve'", async (t) =
   const ready = brain.ready.get(requestId)!;
   const finalOffer = market.offers.get(ready.offerId!)!;
   assert.equal(finalOffer.session_id, acme.session_id);
-  assert.equal(finalOffer.total_cents, 34000);
+  assert.equal(finalOffer.total_cents, 37000);
   assert.ok(logs.some((l) => l.msg === `READY TO RESERVE: offer ${ready.offerId}`), "ready log line");
 
   // The Bay Office session (floors above budget) never became acceptable.
@@ -151,11 +152,12 @@ test("self-serve business: dynamic seller agent negotiates and wins, then its ow
   await waitFor(() => brain.ready.has(requestId), 15000);
   await runner.idle();
 
-  // The owner's floors (16000 + 9000 + 1000 delivery) let its agent meet the buyer's $280 target.
+  // The owner's floors (16000 + 9000 + 1000 delivery) are under the buyer's $280 target, but its agent does not
+  // give the floor away on the first counter: it meets the buyer partway and settles within budget.
   const ready = brain.ready.get(requestId)!;
   const offer = market.offers.get(ready.offerId!)!;
   assert.equal(market.sessions.get(offer.session_id)!.seller_id, "s-jaxon");
-  assert.equal(offer.total_cents, 28000);
+  assert.equal(offer.total_cents, 31375);
   assert.ok(market.toolCalls.some((c) => c.token === "tok-jaxon" && c.name === "make_offer"), "the dynamic agent used its minted token");
   assert.equal(runner.registry.seller("s-jaxon")!.dynamic, true);
 
@@ -165,7 +167,7 @@ test("self-serve business: dynamic seller agent negotiates and wins, then its ow
   await waitFor(() => logs.some((l) => l.msg === "sale email sent"), 5000);
   const sent = logs.find((l) => l.msg === "sale email sent")!;
   assert.equal(sent.from, "seller:s-jaxon");
-  assert.ok(logs.some((l) => l.msg === "email (local transport: not sent)" && l.subject === "Sold: Desk + ergonomic chair, $280.00"));
+  assert.ok(logs.some((l) => l.msg === "email (local transport: not sent)" && l.subject === "Sold: Desk + ergonomic chair, $313.75"));
   assert.ok(market.acks.includes(market.outbox.find((e) => e.kind === "order.confirmed" && e.payload.order_id === orderId)!.id));
   assert.equal(runner.turns.length, turnsBefore, "order.confirmed never runs a brain turn");
   assert.deepEqual(market.mints, ["s-jaxon"], "minted once, reused for the notice");

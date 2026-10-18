@@ -212,7 +212,7 @@ describe("oauth mode: full sign-in through a fake Exchangent OAuth server", () =
     assert.match(provider.saved!.access_token, /^mcp_at_/);
 
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 19);
+    assert.equal(tools.length, 34);
 
     const who = (await client.callTool({ name: "whoami", arguments: {} })).structuredContent as Record<string, any>;
     assert.equal(who.status, "ok");

@@ -55,7 +55,8 @@ const err=(r: Reply,code: string,status?: number)=>{assert.equal(r.body.error?.c
 const inv=(seller: string,sku: string)=>seedId(`inventory:${SLUG[seller]}:${sku}`);
 const SLUG: Record<string,string>={};
 const has=(v: unknown,k: string)=>JSON.stringify(v).includes(`"${k}"`);
-const requirements={region:'san_francisco',deliver_by:'2026-10-18',items:[{category:'desk',max_width_in:48},{category:'chair',ergonomic:true}]};
+// deliver_by is enforced since migration 0800 (seller delivery_days must fit); a far date keeps every seeded seller in.
+const requirements={region:'san_francisco',deliver_by:'2099-12-31',items:[{category:'desk',max_width_in:48},{category:'chair',ergonomic:true}]};
 const order={title:'Desk and ergonomic chair',requirements,budget_cents:40000,target_cents:36000};
 
 test('full negotiation loop through HTTP on real Postgres',async t=>{
@@ -213,7 +214,7 @@ test('full negotiation loop through HTTP on real Postgres',async t=>{
   const mine=events.filter(e=>e.route.request_id===request.request_id);
   assert.deepEqual(mine.map(e=>e.kind),['session.opened','session.opened','offer.created','counter.created','offer.created','session.declined']);
   const shapes: Record<WorkerEvent['kind'],string[]>={'session.opened':['request_id','session_id'],'offer.created':['note','offer_id','request_id','session_id','total_cents'],
-   'counter.created':['counter_id','note','session_id','total_cents'],'session.declined':['session_id'],
+   'counter.created':['counter_id','note','session_id','total_cents'],'session.declined':['session_id'],'session.closed':['reason','request_id','session_id'],
    'order.confirmed':['currency','order_id','request_id','reservation_id','seller_id','title','total_cents']};
   for(const e of events) assert.deepEqual(Object.keys(e.payload).sort(),shapes[e.kind],e.kind);
   const [{bad}]=await sql<{bad: number}>(`SELECT count(*)::int AS bad FROM commerce_outbox WHERE payload::text ~ '(budget|target|floor)'`);

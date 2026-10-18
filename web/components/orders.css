@@ -1,0 +1,55 @@
+/* Orders, problem cases and the resolution policy (dashboard). Reuses the thread bubble styles. */
+.orders-section{margin-top:28px}
+.order-list,.case-list{display:grid;gap:10px}
+.case-list{margin-top:14px}
+.order-card{border:1px solid var(--line);border-radius:12px;background:#fff}
+.order-card summary{display:flex;align-items:center;gap:12px;padding:13px 15px;cursor:pointer;list-style:none}
+.order-card summary::-webkit-details-marker{display:none}
+.order-card summary>div{flex:1;min-width:0;display:grid;gap:3px}
+.order-card summary strong{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.order-card summary span{font-size:11.5px;color:var(--ink-muted);font-variant-numeric:tabular-nums}
+.order-card[open] summary{border-bottom:1px solid var(--line)}
+.order-body{padding:15px;display:grid;gap:14px}
+.order-steps{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.order-steps li{display:flex;gap:8px;align-items:flex-start;padding:10px;border:1px solid var(--line);border-radius:10px;color:var(--ink-muted);min-width:0}
+.order-steps li.done{color:var(--ink);background:var(--surface-soft)}
+.order-step-dot{flex:none;width:18px;height:18px;border-radius:50%;border:1px solid var(--line-strong);display:grid;place-items:center;background:#fff}
+.order-steps li.done .order-step-dot{background:var(--primary);border-color:var(--primary);color:#fff}
+.order-steps li>div{display:grid;gap:2px;min-width:0}
+.order-steps strong{font-size:12px;font-weight:600}
+.order-steps time,.order-steps small{font-size:10.5px;color:var(--ink-muted);overflow-wrap:anywhere}
+.respond-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.case-card{border:1px solid var(--line);border-radius:12px;padding:14px;display:grid;gap:10px;background:#fff}
+.case-card.open{border-color:var(--line-strong)}
+.case-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.case-head>div{display:grid;gap:3px;min-width:0}
+.case-head strong{font-size:13.5px}
+.case-head span{font-size:11.5px;color:var(--ink-muted)}
+.case-desc{font-size:12.5px;color:var(--ink-secondary);line-height:1.55}
+.case-thread{padding:2px 0}
+.bubble-price.small{font-size:15px;letter-spacing:-.01em}
+.case-note{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.5;padding:9px 11px;border-radius:9px;border:1px solid var(--line)}
+.case-note svg{flex:none;margin-top:2px}
+.case-note.ok{background:#eef3e7;border-color:#d3dfc4;color:#34432a}
+.case-note.warn{background:#fbf3ee;border-color:#ecd5c6;color:#6a3d24}
+.case-evidence{list-style:none;margin:0;padding:0;display:grid;gap:5px;font-size:11.5px}
+.case-evidence li{display:flex;gap:8px;min-width:0}
+.case-evidence li>span:first-child{flex:none;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted);padding-top:1px}
+.case-evidence a,.case-evidence span{overflow-wrap:anywhere}
+.case-refunds{display:flex;flex-wrap:wrap;gap:6px;font-size:11px;font-variant-numeric:tabular-nums}
+.case-refunds span{border:1px solid var(--line);border-radius:999px;padding:3px 9px;background:var(--surface-soft)}
+.respond-bar{display:grid;gap:8px;border-top:1px dashed var(--line);padding-top:10px}
+.counter-form{gap:10px}
+.item-picks{border:1px solid var(--line);border-radius:9px;padding:8px 12px;display:grid;gap:2px}
+.item-picks legend{font-size:12px;padding:0 4px;color:var(--ink-secondary)}
+.item-picks .check-label{min-height:30px}
+.stack-form textarea{width:100%;border:1px solid var(--line-strong);border-radius:7px;padding:10px 12px;font:inherit;font-size:13px;resize:vertical;background:#fff;color:var(--ink)}
+.fulfilment-section{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+.policy-row{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(150px,auto);align-items:center;gap:12px}
+.policy-row>span:first-child{font-size:12.5px}
+.policy-input{display:flex;align-items:center;gap:8px}
+.policy-input input{width:90px!important}
+.policy-input small{font-size:11px;color:var(--ink-muted);white-space:nowrap}
+.attr-rows{display:grid;gap:8px}
+.attr-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:center}
+@media(max-width:720px){.order-steps{grid-template-columns:repeat(2,minmax(0,1fr))}.policy-row{grid-template-columns:1fr}}

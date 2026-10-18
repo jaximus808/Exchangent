@@ -1,5 +1,6 @@
 import { logger, money, short } from "./log.ts";
-import type { Agent, AgentRegistry, SellerAgent } from "./agents.ts";
+import type { Agent, AgentRegistry } from "./agents.ts";
+import { BackendError } from "./backend.ts";
 import type { WorkerApi, WorkerEvent } from "./backend.ts";
 import type { DeliveryReceipt, Transport } from "./transport/index.ts";
 
@@ -11,11 +12,15 @@ export type Route =
   | { error: string; from?: undefined; to?: undefined; skip?: undefined }
   | { skip: string; from?: undefined; to?: undefined; error?: undefined };
 
-/** Handles a notice event (order.confirmed) for its seller agent. Never a brain turn, never a transport send. */
-export type NoticeHandler = (to: SellerAgent, event: WorkerEvent) => Promise<void>;
+/**
+ * Handles a notice event for its agent: order.confirmed (seller: sale email; buyer: order email) and
+ * session.closed (seller: log). Never a brain turn, never a transport send.
+ */
+// Method-style (bivariant) so a handler written for one role, e.g. (to: SellerAgent, ...), still fits.
+export type NoticeHandler = { handle(to: Agent, event: WorkerEvent): Promise<void> }["handle"];
 
-/** Event kinds that are notices for an agent rather than negotiation turns. */
-export const NOTICE_KINDS: ReadonlySet<string> = new Set(["order.confirmed"]);
+/** Event kinds that are notices for an agent rather than negotiation turns. Mutable: features add their own. */
+export const NOTICE_KINDS: Set<string> = new Set(["order.confirmed", "session.closed"]);
 
 export interface DispatcherOptions {
   api: Pick<WorkerApi, "events" | "ack">;
@@ -23,10 +28,18 @@ export interface DispatcherOptions {
   registry: AgentRegistry;
   pollMs?: number;
   limit?: number;
-  /** Ack events created before this time without delivering them (SKIP_BACKLOG). */
+  /**
+   * Ack events created before this time without delivering them (SKIP_BACKLOG). The runner sets it to its start
+   * time minus SKIP_BACKLOG_MINUTES, so a restart never drops a haggle that is still in progress.
+   */
   since?: Date | null;
-  /** order.confirmed -> sale email (SaleNotifier.onOrder). Without one, notices are acked and skipped. */
+  /** Notices (NOTICE_KINDS) -> emails and logs. Without one, notices are acked and skipped. */
   onNotice?: NoticeHandler | null;
+  /**
+   * After-sale notices (cases.ts CASE_NOTICE_KINDS: shipped, resolved, refunds, disputes) -> emails to people.
+   * Handled before routing, acked after; never a transport send or a brain turn. Throwing retries the event.
+   */
+  caseNotices?: { kinds: ReadonlySet<string>; handle(event: WorkerEvent): Promise<void> } | null;
 }
 
 /**
@@ -43,10 +56,11 @@ export class Dispatcher {
   lastError: Map<string, string>;
   since: Date | null;
   onNotice: NoticeHandler | null;
+  caseNotices: DispatcherOptions["caseNotices"];
   timer: ReturnType<typeof setTimeout> | null;
   stopped: boolean;
 
-  constructor({ api, transport, registry, pollMs = 1000, limit = 20, since = null, onNotice = null }: DispatcherOptions) {
+  constructor({ api, transport, registry, pollMs = 1000, limit = 20, since = null, onNotice = null, caseNotices = null }: DispatcherOptions) {
     this.api = api;
     this.transport = transport;
     this.registry = registry;
@@ -56,6 +70,7 @@ export class Dispatcher {
     this.lastError = new Map(); // event id -> last error message (log each distinct failure once)
     this.since = since;
     this.onNotice = onNotice;
+    this.caseNotices = caseNotices;
     this.timer = null;
     this.stopped = true;
   }
@@ -104,6 +119,28 @@ export class Dispatcher {
         await this.#skip(event, "backlog from before the runner started");
         continue;
       }
+      // A lost or expired session needs no agent: log it without minting a seller token or an Inkbox identity.
+      if (event.kind === "session.closed") {
+        const reason = String((event.payload as { reason?: unknown } | undefined)?.reason ?? "closed");
+        log.info("session closed", { session: event.payload?.session_id, seller: short(event.route?.seller_id), reason, event: short(event.id) });
+        const known = event.route?.seller_id ? this.registry.seller(event.route.seller_id) : null; // cached only, never mints
+        console.log(`💬 Exchangent → ${known ? `${known.name} agent` : `seller ${short(event.route?.seller_id)}`}: closed (${reason})`);
+        await this.api.ack(event.id);
+        this.lastError.delete(event.id);
+        delivered++;
+        continue;
+      }
+      if (this.caseNotices?.kinds.has(event.kind)) {
+        try {
+          await this.caseNotices.handle(event);
+          await this.api.ack(event.id);
+          this.lastError.delete(event.id);
+          delivered++;
+        } catch (err) {
+          this.#fail(event, (err as Error).message);
+        }
+        continue;
+      }
       let route: Route;
       try {
         route = await this.route(event);
@@ -122,7 +159,7 @@ export class Dispatcher {
       }
       if (blocked.has(to.id)) continue;
       if (NOTICE_KINDS.has(event.kind)) {
-        if (to.role !== "seller" || !this.onNotice) {
+        if (!this.onNotice) {
           await this.#skip(event, "no notice handler for this agent");
           continue;
         }
@@ -184,7 +221,10 @@ export class Dispatcher {
         this.lastError.delete("__poll");
       } catch (err) {
         const message = (err as Error).message;
-        if (this.lastError.get("__poll") !== message) log.error("poll failed", { reason: message });
+        const hint = err instanceof BackendError && err.status === 401
+          ? "the worker token expired or was revoked: run `npm run agents:tokens` in backend/, then restart the runner"
+          : undefined;
+        if (this.lastError.get("__poll") !== message) log.error("poll failed", { reason: message, ...(hint ? { hint } : {}) });
         this.lastError.set("__poll", message);
       }
       if (!this.stopped) this.timer = setTimeout(loop, this.pollMs);
@@ -198,7 +238,7 @@ export class Dispatcher {
   }
 }
 
-const SAID = new Set(["offer.created", "counter.created", "session.declined"]);
+const SAID = new Set(["offer.created", "counter.created", "session.declined", "case.opened", "case.offer"]);
 
 /** Who moved, for the transcript: an agent, or a person negotiating in chat (no sender agent). */
 function speaker(agent: Agent | null, other: Agent): string {
@@ -214,7 +254,12 @@ function speaker(agent: Agent | null, other: Agent): string {
 export function transcriptLine(from: Agent | null, to: Agent, event: WorkerEvent, receipt?: DeliveryReceipt): string | null {
   if (!SAID.has(event.kind)) return null;
   const p = event.payload ?? {};
-  const what = event.kind === "session.declined" ? "declined" : typeof p.total_cents === "number" ? money(p.total_cents) : event.kind;
+  const caseAmount = typeof p.amount_cents === "number" ? ` ${money(p.amount_cents)}` : "";
+  const what =
+    event.kind === "session.declined" ? "declined"
+    : event.kind === "case.opened" ? `case opened (${String(p.type ?? "issue").replace(/_/g, " ")})${caseAmount}`
+    : event.kind === "case.offer" ? `case ${String(p.action ?? "offer")}${p.remedy_kind ? ` ${String(p.remedy_kind).replace(/_/g, " ")}` : ""}${caseAmount}`
+    : typeof p.total_cents === "number" ? money(p.total_cents) : event.kind;
   const note = typeof p.note === "string" && p.note.trim() ? ` "${p.note.trim()}"` : "";
   const hop = receipt ? ` [${receipt.transport}${receipt.from_handle ? ` ${receipt.from_handle}` : ""} → ${receipt.to_handle ?? to.slug}]` : "";
   return `💬 ${speaker(from, to)} → ${speaker(to, to)}: ${what}${note}${hop}`;

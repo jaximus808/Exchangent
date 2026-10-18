@@ -18,6 +18,8 @@ import type {
 import { logger, money } from "../log.ts";
 import type { Agent } from "../agents.ts";
 import type { Brain, TurnEvent } from "../runner.ts";
+import { isCaseTurn, mockCaseTurn } from "../cases.ts";
+import type { CaseTurnResult } from "../cases.ts";
 
 const log = logger("brain:mock");
 
@@ -25,6 +27,11 @@ export const CONCESSION = 0.05; // seller gives 5% per round, never below floor
 // `rounds` comes from the backend and counts seller offers in the session.
 export const BUYER_STOP_ROUND = 3; // from round 3 on, any offer <= budget is acceptable
 export const BUYER_MAX_ROUNDS = 8; // safety valve: decline a seller that will not converge
+// The buyer never counters above this share of the budget: a counter at exactly the budget gives it away.
+export const BUYER_BUDGET_CAP = 0.97;
+// The seller accepts a counter at or above its floor-based minimum only from this round on; earlier it meets
+// the buyer halfway, so it does not give its floor away on the first counter.
+export const SELLER_ACCEPT_FROM_ROUND = 3;
 
 export type SessionStatus = "open" | "declined" | "closed";
 const SESSION_STATUSES = new Set<unknown>(["open", "declined", "closed"]);
@@ -121,7 +128,8 @@ export type MockTurnResult =
   | { action: "decline"; result?: DeclineResult }
   | { action: "offer"; reason: string; totalCents: number; offerId: string | undefined }
   | { action: "ready"; offerId: string | undefined; totalCents: number; sessionId: string | undefined }
-  | { action: "counter"; totalCents: number; reason: string };
+  | { action: "counter"; totalCents: number; reason: string }
+  | CaseTurnResult;
 
 export interface MockBrain extends Brain<MockTurnResult> {
   name: "mock";
@@ -290,6 +298,17 @@ export function decideSeller(neg: Negotiation, inventory: InventoryItem[]): Sell
   const counter = neg.latestCounter;
   const counterTotal = counter ? Number(counter.total_cents) : null;
   if (counter && counterTotal !== null && counterTotal >= minTotal) {
+    const lastTotal = Number(neg.latestOffer?.total_cents);
+    const halfway = Number.isFinite(lastTotal) ? Math.max(minTotal, Math.round((lastTotal + counterTotal) / 2)) : NaN;
+    if (neg.rounds < SELLER_ACCEPT_FROM_ROUND && halfway > counterTotal) {
+      return {
+        action: "offer",
+        lines: allocateAtTotal(bundle, halfway - deliveryCents),
+        deliveryCents,
+        note: "We can meet you partway on the bundle.",
+        reason: "meets halfway",
+      };
+    }
     return {
       action: "offer",
       lines: allocateAtTotal(bundle, counterTotal - deliveryCents),
@@ -342,7 +361,7 @@ export function decideBuyer(order: BuyOrder, sessionId: string | undefined): Buy
   if (s.rounds >= BUYER_MAX_ROUNDS) return { action: "decline", session: s };
   // targetCents is null only when the order has no budget either (normalizeOrder); Math.min then treats it as 0, as before.
   let total = s.counter ? Math.round((s.counter.totalCents + s.offer.totalCents) / 2) : (targetCents as number);
-  if (budgetCents !== null) total = Math.min(total, budgetCents);
+  if (budgetCents !== null) total = Math.min(total, Math.floor(budgetCents * BUYER_BUDGET_CAP));
   total = Math.min(total, s.offer.totalCents - 1);
   return { action: "counter", session: s, totalCents: total, reason: s.counter ? "splits the difference" : "counters at target" };
 }
@@ -458,6 +477,7 @@ export function createMockBrain({ mcpFor }: { mcpFor: (agent: Agent) => Promise<
     name: "mock",
     ready,
     async turn(agent, event) {
+      if (isCaseTurn(event.kind)) return mockCaseTurn(agent, event, await mcpFor(agent)); // after-sale case (cases.ts)
       return agent.role === "seller" ? sellerTurn(agent, event) : buyerTurn(agent, event);
     },
   };
