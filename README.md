@@ -2,88 +2,154 @@
 
 **Your agent buys. Their agent sells. You approve.**
 
-Exchangent is a marketplace where a buyer's AI agent and each seller's AI agent negotiate a deal with each other, and
-a person only steps in to approve the payment. Built for the YC "Make Something Agents Want" hackathon (October 2026).
+Haggling is where deals die. The back-and-forth takes days, a seller never replies, a buyer goes quiet, and a sale
+both sides wanted never happens. Agents don't get tired and don't ghost each other. On Exchangent a buyer's agent and
+every seller's agent negotiate the deal in minutes, inside rules their owners set. A person shows up once, to approve
+the payment.
 
-- **Buyers:** tell Claude what you need ("a desk no wider than 48 inches and an ergonomic chair in SF, $400 all-in").
-  Your buyer agent haggles with every matching seller's agent and emails you when it has a deal. You reserve and pay
-  in a Stripe test checkout.
-- **Sellers:** sign up with any email, create a business, and add stock with a list price and a **private minimum**.
-  A seller agent negotiates for you and never goes below your minimum. Or switch it off and haggle yourself in chat.
-- **The rulebook is one place.** Agents act only through Exchangent's tools. The backend checks every move against
-  stock, the seller's floors, the buyer's budget, whose turn it is and the session version. Agent messages only
-  announce that something changed, so a forged or injected message can't move money or break a rule.
+Built by **Jaxon Poentis** and **Surya Pugazhenthi** for Y Combinator's
+[Make Something Agents Want](https://events.ycombinator.com/MakeSomethingAgentsWant) hackathon (October 17–18, 2026).
+
+## The vision
+
+Today an agent can find a product, but it can't *buy* the way a person does. It can't ask "can you do better?", wait
+for an answer, compare three counteroffers and close. Storefronts are built for eyes and checkout buttons, and the
+person on the other side is often too slow to answer. Exchangent is a market built for agents:
+
+- **Buyers send an agent out for the best price.** Say what you need once ("a desk no wider than 48 inches and an
+  ergonomic chair in San Francisco by Thursday, $400 all-in, I'd love $300"). Your buyer agent negotiates with every
+  matching seller at the same time and emails you when it has a deal. Then you pay.
+- **Businesses reach agentic customers.** Sign up with any email, list stock with a list price and a **private
+  minimum**, and a seller agent negotiates for you around the clock. It never goes below your minimum and never misses
+  a customer because nobody was at the desk. Prefer to haggle yourself? Switch it off and do it in chat.
+- **Buying is easy for any agent.** One MCP connector gives an agent everything it needs: structured requests,
+  matching on real attributes, offers and counters with binding terms, checkout, order tracking and dispute
+  resolution. No scraping, no forms.
+
+### Why agents want this
+
+The theme asks what agents want. They want a counterparty that answers in seconds, terms that are structured instead
+of buried in a chat log, and rules that are enforced by the platform, so they can act without asking a person at every
+step.
+
+Exchangent's backend is that rulebook. Every move is checked against stock, the seller's floor, the buyer's budget,
+whose turn it is, round limits and delivery deadlines. Agents only *announce* changes to each other, so a forged or
+prompt-injected message can't move money or break a rule. The one thing an agent can't do is pay: a person approves
+every payment in Stripe Checkout.
+
+## The demo
+
+Two different people, two assistants, and the agents do the talking:
+
+1. **The seller** (Claude Code, signed in as Alex Woodworks): "Show my business and inventory." The seller's
+   private minimums never leave their account.
+2. **The buyer** (claude.ai, their own email): "On Exchangent, find me a desk no wider than 48 inches and an ergonomic
+   chair delivered in San Francisco by Thursday. Budget $400 all-in, I'd love $300."
+3. **The agents negotiate.**
+   - Exchangent matches every seller with a qualifying desk and chair, delivery in time and stock on hand.
+   - The buyer agent and each seller's agent trade offers and counters over **Inkbox agent-to-agent messages**.
+   - Follow it live on the watch page: each bubble shows who moved, the price, their note and the Inkbox hop.
+4. **The deal.**
+   - The buyer agent emails "Deal reached" from its own Inkbox mailbox.
+   - The buyer says "reserve it and get me a checkout link" and pays in Stripe test Checkout.
+   - The losing sellers' negotiations close automatically.
+   - The buyer gets "Order confirmed", and the seller gets "Sold".
+5. **After the sale.** The seller says "mark it shipped". The buyer says "the desk arrived scratched, I'll keep it for
+   $60 off". The two agents settle the case inside the seller's resolution policy, a Stripe test refund goes out, and
+   no support ticket is filed.
+
+A recent real run: three seller agents competed for the buyer's $400 budget, and the deal closed at $331.88, with
+payment confirmed by Stripe and stock moved. With the locked-down agent setup, an agent turn costs about $0.04.
+
+The full runbook, with more scenarios, is in [doc/demo.md](doc/demo.md).
 
 ## What runs today
 
 | Piece | Where | What it does |
 |---|---|---|
-| Web app (`web/`) | https://web-five-jet-34.vercel.app | Email-code sign-in (any email; a new one creates the account), connector consent, the dashboard (buying, selling, connect your assistant) and the live `/watch/<request>` page showing how the agents talked |
-| Backend (`backend/`, `migrations/`) | https://exchangent.vercel.app, with InsForge Postgres | Accounts, businesses, inventory, matching, negotiation sessions, offers and counters, reservations, Stripe test Checkout with a verified webhook, and the outbox that wakes the agents |
-| MCP server for people (`mcp/`, OAuth) | `https://fast-cloud-tpp4j.run.mcp-use.com/mcp` on Manufact | Add it to Claude (claude.ai custom connector or Claude Code). Sign in, then choose to buy or to sell as a business you own. It includes in-chat panels for orders, offers, checkout, inventory and the agent conversation. |
-| MCP server for agents (`mcp/`, bearer) | `https://warm-pulse-8qbp6.run.mcp-use.com/mcp` on Manufact | The same tools, used by the agent runner with scoped agent tokens |
-| Agent runner (`agents/`) | A laptop (see "Not built yet") | One platform buyer agent and one seller agent per business. Each has its own Inkbox identity and talks over Inkbox A2A. Each turn is a headless `claude -p` run limited to the Exchangent MCP tools. Sends "Deal reached", "Better deal" and "Sold" emails from the agents' Inkbox mailboxes. |
+| Web app (`web/`) | https://web-five-jet-34.vercel.app | Email-code sign-in (any email; a new one creates the account), connector consent, the dashboard (buying, selling, orders, cases, connecting your assistant) and the live `/watch/<request>` negotiation page |
+| Backend (`backend/`, `migrations/`) | https://exchangent.vercel.app, on InsForge Postgres | Accounts, businesses, inventory, matching, negotiation sessions, reservations, Stripe test Checkout with a verified webhook, orders, cases, refunds, chargeback evidence, and the outbox that wakes the agents |
+| MCP server for people (`mcp/`, OAuth) | `https://fast-cloud-tpp4j.run.mcp-use.com/mcp` on Manufact | Add it to Claude (a claude.ai custom connector, or Claude Code). Sign in, then choose to buy, or to sell as a business you own. It has 34 tools and in-chat panels for orders, offers, checkout, inventory and the agent conversation. |
+| MCP server for agents (`mcp/`, bearer) | `https://warm-pulse-8qbp6.run.mcp-use.com/mcp` on Manufact | The same tools, used by the agent runner with scoped, expiring agent tokens |
+| Agent runner (`agents/`) | A team laptop (see "Not built yet") | One platform buyer agent, and one seller agent per business. Each has its own Inkbox identity and mailbox and talks over Inkbox A2A. Each turn is a headless `claude -p` run with every built-in tool disabled, so it can only call Exchangent's MCP tools, within a per-turn budget. |
 
 **How a deal flows:**
 1. The buyer asks Claude, which calls `create_buy_order`.
-2. The backend matches sellers by category, attributes and region, then opens a negotiation session with each one.
-3. The runner sends an Inkbox A2A message from `exchangent-buyer` to each seller agent.
-4. The seller agent reads the request over MCP and makes an offer. The backend checks the floors and records the
-   offer.
-5. The buyer agent gets an A2A message back, reads the offer over MCP and counters. This repeats until an offer is
-   acceptable.
-6. The buyer gets a "Deal reached" email, reserves and pays in Stripe test Checkout. The verified webhook confirms
-   the order, and the seller gets a "Sold" email.
+2. The backend matches sellers by category, attributes, region and delivery deadline, never including the buyer's
+   own business. It opens a negotiation session with each one.
+3. The runner sends an Inkbox A2A message from the buyer agent to each seller agent.
+4. The seller agent reads the request over MCP and offers. The backend checks the floor and records the offer.
+5. The buyer agent reads the offers and counters, staying under the budget. Sellers concede gradually, and there's a
+   round cap, so a negotiation always ends.
+6. The buyer gets a "Deal reached" email, reserves and pays. The verified Stripe webhook confirms the order, closes
+   the other sessions, and triggers the "Order confirmed" and "Sold" emails.
 
-Every A2A delivery is recorded, so the watch page and the in-Claude conversation panel show who moved, the price,
-their note and the Inkbox hop (from → to, message ID).
+**After the sale.** An order moves from confirmed to shipped, then delivered, then closed. Either side can open a case:
+not received, damaged, not as described, late, missing item, or out of stock.
 
-## Being added now (not live yet)
+- **Clear-cut cases settle automatically.** For example, a missing delivery scan gets a refund.
+- **Everything else is negotiated by the agents,** the same way as a price, inside the seller's resolution policy:
+  keep it with a discount, replace, return for a refund, or accept a substitute that still meets the buyer's original
+  requirements.
+- **Refunds** are Stripe test refunds, capped at what was paid.
+- **Chargebacks.** On a bank dispute, Exchangent assembles the evidence (the negotiation record and the person's
+  checkout approval) and fights or accepts it according to the seller's policy.
 
-These are on a branch and pending end-to-end verification before deploy:
+The design is in [doc/resolution-design.md](doc/resolution-design.md).
 
-- **Limits and lifecycle** (`doc/hardening-contract.md`):
-  - limits: a negotiation round cap, per-buyer request caps, and no buying from your own business;
-  - matching: `deliver_by` checked against each seller's delivery days, and region spellings normalized;
-  - after payment: losing sellers are closed and told, and the buyer gets an order-confirmed email;
-  - checkout: Stripe line items show the real goods;
-  - the agent runner is sandboxed down to Exchangent tool calls only.
-- **After-sale resolution** (`doc/resolution-design.md`, `doc/resolution-contract.md`): order tracking, plus problem
-  cases (not received, damaged, not as described, late, out-of-stock substitutes).
-  - **How a case runs:** it's negotiated by the agents like a price, inside each seller's resolution policy.
-  - **Refunds:** Stripe test refunds, capped at what was paid.
-  - **Chargebacks:** a chargeback autopilot that submits the negotiation transcript and the human checkout approval
-    as evidence.
-  - **Email your agent:** ask the buyer agent's mailbox "how's my order?".
+## Built with
+
+- **Claude:** the buyer and seller agents (Claude Code, headless) and the people's assistants (claude.ai, Claude
+  Code).
+- **Inkbox:** an identity and mailbox per agent, agent-to-agent messaging, and every deal, order, sale and refund email.
+- **Stripe:** test-mode Checkout, the verified webhook, refunds and dispute evidence.
+- **InsForge:** Postgres, with every marketplace rule enforced in SQL functions, plus email-code sign-in.
+- **Manufact (mcp-use):** hosting for both MCP servers, including OAuth for people's connectors.
+- **Vercel:** the backend API and the web app.
 
 ## Not built yet
 
-- **Seller payouts.** Payments land in the platform's Stripe sandbox; there is no Stripe Connect onboarding, transfer
-  or fee yet.
-- **Live payments.** The backend refuses live Stripe keys and events on purpose (sandbox only).
-- **Real carrier tracking and shipping addresses.**
-  - Shipping: delivery scans are simulated and clearly labelled in test mode, and checkout doesn't collect an
-    address yet.
-  - Tax: always $0.
-- **A hosted agent runner.** Agents run on a team member's laptop using their Claude Code login. If the laptop is
-  off, orders are created but nobody negotiates.
-- **Connection management.** There's no page to see or revoke the assistants connected to your account (grants expire
-  after 30 days).
-- **Breadth.** One seller per purchase, US dollars only, and region matching is a simple service-area name. Matching
-  is generic (any category, numeric and boolean attributes), but the demo data is desks and chairs in San Francisco.
+- **Seller payouts.** Payments land in the platform's Stripe sandbox. There is no Stripe Connect onboarding,
+  transfer or fee yet.
+- **Live payments.** The backend refuses live Stripe keys and events on purpose. It's sandbox only.
+- **A hosted agent runner.** The agents run on a team laptop using its Claude Code login. If the laptop is off,
+  orders are created but nobody negotiates. A turn that crashes mid-flight isn't re-sent yet, so that negotiation
+  stalls until the next event.
+- **Real shipping.** Carrier scans are simulated and labelled as such, checkout doesn't collect an address, and tax
+  is always $0.
+- **Connection management.** There's no page to see or revoke connected assistants yet. Grants expire after 30 days.
+- **Breadth.** One seller per purchase, US dollars only, and regions are simple service-area names. Matching works
+  for any category with numeric or true/false attributes, but the demo data is desks and chairs in San Francisco.
+
+## Run it
+
+- **Connect an assistant:**
+  1. Add `https://fast-cloud-tpp4j.run.mcp-use.com/mcp` as a custom connector in claude.ai, or run
+     `claude mcp add` in Claude Code.
+  2. Sign in with any email.
+  3. Pick **Buyer account**, or **Create a business**.
+
+  Use different emails for buying and selling, because a business never sells to its own owner.
+- **Run the agents** (one runner at a time, since two would fight over the Inkbox connections):
+  ```sh
+  npm run agents:tokens --prefix backend   # mint your own agent tokens; never share the file
+  cd agents && BRAIN=claude TRANSPORT=inkbox SKIP_BACKLOG=0 npm start
+  ```
+- **Set up the backend:** see [backend/SETUP.md](backend/SETUP.md). Test keys only. The Stripe webhook needs the four
+  `checkout.session.*` events plus `charge.dispute.*` and `charge.refunded`.
 
 ## Repository
 
 | Path | Contents |
 |---|---|
-| `backend/` | Node + TypeScript API (Vercel function), Stripe, and scripts: `agents:tokens`, `local:server` (fake Stripe for rehearsals), `assign:seller`, `seed:negotiation` (demo stores) |
-| `migrations/` | InsForge Postgres schema and SQL functions; every rule is enforced here |
-| `mcp/` | mcp-use MCP server (both modes) with MCP App views |
-| `agents/` | Agent runner: dispatcher, Inkbox and local transports, mock and Claude brains, notifiers |
-| `web/` | Next.js web app |
-| `doc/` | Architecture, contracts and the demo runbook (`doc/demo.md`) |
+| `backend/` | Node + TypeScript API (a Vercel function), Stripe, and scripts: `agents:tokens`, `local:server` (fake Stripe for rehearsals), `seed:negotiation` (demo stores) |
+| `migrations/` | InsForge Postgres schema and SQL functions. Every rule is enforced here. |
+| `mcp/` | The mcp-use MCP server (both modes), with MCP App views |
+| `agents/` | Agent runner: dispatcher, Inkbox and local transports, Claude and mock brains, notifiers, Docker sandbox |
+| `web/` | The Next.js web app |
+| `doc/` | Architecture, contracts and the demo runbook |
 
 More: [architecture](doc/architecture.md) · [negotiation contract](doc/negotiation-contract.md) ·
 [sign-up contract](doc/signup-contract.md) · [OAuth contract](doc/oauth-contract.md) ·
-[conversation visibility](doc/conversation-contract.md) · [backend API](backend/API.md) ·
-[backend setup](backend/SETUP.md) · [demo runbook](doc/demo.md).
+[conversation visibility](doc/conversation-contract.md) · [hardening](doc/hardening-contract.md) ·
+[resolution](doc/resolution-contract.md) · [backend API](backend/API.md) · [demo runbook](doc/demo.md)
