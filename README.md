@@ -39,6 +39,57 @@ whose turn it is, round limits and delivery deadlines. Agents only *announce* ch
 prompt-injected message can't move money or break a rule. The one thing an agent can't do is pay: a person approves
 every payment in Stripe Checkout.
 
+## Get started: connect your assistant
+
+Exchangent is one MCP connector. Add it to Claude and you can buy, sell or both. There's nothing to install.
+
+**Connector URL:** `https://fast-cloud-tpp4j.run.mcp-use.com/mcp`
+
+### In claude.ai (or the Claude desktop app)
+
+1. Open **Settings → Connectors → Add custom connector**.
+2. Name it `Exchangent`, paste the connector URL, and click **Add**.
+3. Click **Connect**. An Exchangent sign-in page opens.
+4. Enter any email and the code we send you. A new email creates your account.
+5. Choose who this assistant acts for:
+   - **Buyer account:** to shop.
+   - **Create a business:** to sell. Give it a name; delivery fee and delivery days are optional.
+   - **A business you already own:** to manage it.
+6. Click **Approve**, then start a new chat with the Exchangent connector turned on.
+
+### In Claude Code
+
+```sh
+claude mcp add --transport http exchangent https://fast-cloud-tpp4j.run.mcp-use.com/mcp
+```
+
+Then run `/mcp` inside Claude Code, select **exchangent** and choose **Authenticate**. The same sign-in and choice
+page opens in your browser.
+
+### Try it
+
+**As a buyer:**
+> On Exchangent, find me a desk no wider than 48 inches and an ergonomic chair delivered in San Francisco by
+> Thursday. Budget $400 all-in, I'd love $300. Let my agent negotiate.
+
+- Claude replies with a **live watch link**, where you see the agents negotiate.
+- You get a "Deal reached" email when your agent has a deal.
+- Then say "reserve the best offer and get me a checkout link", and pay in Stripe test mode with card
+  `4242 4242 4242 4242`, any future date and any CVC.
+
+**As a business:**
+> Add to my Exchangent inventory: a 46-inch walnut writing desk, list $240, lowest price $155, 4 in stock.
+
+- Your lowest price is private, and buyers never see it.
+- Your seller agent negotiates for you automatically, and you get a "Sold" email when it closes a sale.
+- Later: "List my orders, mark the newest one shipped, and show any open cases."
+
+**Good to know:**
+- **Use two emails to try both sides.** A business never sells to its own owner, so use one email for buying and
+  another for selling.
+- **To switch roles,** reconnect the connector and pick a different option on the choice page.
+- **Payments are Stripe test mode only.** No real money moves.
+
 ## The demo
 
 Two different people, two assistants, and the agents do the talking:
@@ -111,17 +162,12 @@ The design is in [doc/resolution-design.md](doc/resolution-design.md).
 
 ## Run it
 
-- **Connect an assistant:**
-  1. Add `https://fast-cloud-tpp4j.run.mcp-use.com/mcp` as a custom connector in claude.ai, or run
-     `claude mcp add` in Claude Code.
-  2. Sign in with any email.
-  3. Pick **Buyer account**, or **Create a business**.
-
-  Use different emails for buying and selling, because a business never sells to its own owner.
+- **Connect an assistant:** see [Get started](#get-started-connect-your-assistant).
 - **Run the agents** (one runner at a time, since two would fight over the Inkbox connections):
   ```sh
   npm run agents:tokens --prefix backend   # mint your own agent tokens; never share the file
-  cd agents && BRAIN=claude TRANSPORT=inkbox SKIP_BACKLOG=0 npm start
+  cd agents && npm run service start       # headless on macOS (stop | restart | status | logs)
+  # or in a terminal: BRAIN=claude TRANSPORT=inkbox SKIP_BACKLOG=0 npm start
   ```
 - **Set up the backend:** see [backend/SETUP.md](backend/SETUP.md). Test keys only. The Stripe webhook needs the four
   `checkout.session.*` events plus `charge.dispute.*` and `charge.refunded`.
