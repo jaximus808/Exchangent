@@ -5,7 +5,8 @@
 //   node scripts/buyer.ts reserve  <offer_id>     -> reserve_offer
 //   node scripts/buyer.ts checkout <reservation_id> -> get_checkout_link
 // Env: MCP_URL (default http://127.0.0.1:3100/mcp), BUYER_TOKEN or PRINCIPALS_FILE (default ../backend/.demo-principals.json),
-// TITLE (create; identical orders are idempotent and return the existing request, so vary it for a new one)
+// TITLE (create; identical orders are idempotent and return the existing request, so vary it for a new one),
+// DELIVER_BY (create; YYYY-MM-DD, default four days from today)
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -18,7 +19,7 @@ const [cmd, arg] = process.argv.slice(2);
 const calls: Record<string, () => [name: string, args: Record<string, unknown>]> = {
   create: () => ['create_buy_order', {
     title: process.env.TITLE ?? 'Desk + ergonomic chair', budget_cents: 40000, target_cents: 30000,
-    requirements: { region: 'san_francisco', deliver_by: '2026-10-18',
+    requirements: { region: 'san_francisco', deliver_by: process.env.DELIVER_BY ?? new Date(Date.now() + 4 * 86_400_000).toISOString().slice(0, 10),
       items: [{ category: 'desk', max_width_in: 48 }, { category: 'chair', ergonomic: true }] },
   }],
   status: () => ['get_buy_order', { request_id: arg }],
