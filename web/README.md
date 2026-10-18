@@ -7,7 +7,7 @@ and Claude send people to when they add the Exchangent connector.
 |---|---|
 | `/` signed out | Landing: how it works, email-code sign-in (any email; a new one creates the account), how to connect Claude |
 | `/` signed in | Dashboard. **Overview** (live negotiations, deals, best offer, businesses), **Buying** (requests with best offer, seller count and agent on/off; per request the current offers with Reserve & pay → Stripe test checkout, the receipt once paid, and every agent message per seller), **Selling** (each business: inventory with list price and private minimum, add an item, agent on/off, live negotiations from the seller's side), **Connect** (MCP URL and Claude / Claude Code steps). **Orders** (Buying): each paid order's timeline (paid → shipped → delivered, with simulated scans labelled), "It arrived", **Report a problem** and every case with accept / counter / decline and refunds. **Selling** also lists orders to ship (Mark shipped; Simulate delivery in test mode), problem cases to answer, and a resolution-policy editor. Order sections stay hidden on a backend without the order routes. Deep links: `/#buying`, `/#selling`, `/#connect` |
-| `/watch/<request_id>` | Live, projector-friendly view of one request for its buyer: one column per seller, chat bubbles with price, note, who moved and the Inkbox A2A hop (from → to, message ID). Polls every 1.5 s while negotiating. Dark by default, light toggle, full-screen button |
+| `/watch/<request_id>` | Live, projector-friendly view of one request for its buyer: one column per seller, chat bubbles with price, note, who moved and the Inkbox A2A hop (from → to, message ID). Polls every 1.5 s while negotiating. Light workspace, offer race, verified purchase finish, saved-state recovery, evidence receipt and full-screen button |
 
 The commerce proxy (`app/api/commerce/[...path]`) only forwards the paths the pages use, with the signed-in
 InsForge session. Data shapes: `doc/conversation-contract.md`. Requests are placed from Claude (structured
@@ -70,3 +70,40 @@ Without the InsForge variables the page renders a "Sign-in is unavailable" state
   (`https://exchangent.vercel.app/api/v1/oauth/token`).
 - In the InsForge dashboard, allow the web project's domain if InsForge restricts origins or
   redirect URLs.
+
+## Live watch redesign
+
+The watch page is a read-only observer: compact seller comparison, one filterable
+activity feed, and a reservation-backed outcome. It defaults to the light workspace
+style. Completed orders are not labeled paused. Pending payments keep a verifying
+state; the selected seller comes from the reservation, not a later cheapest offer.
+“View order” opens the same request using `?request=<id>#buying`.
+
+Selling refreshes saved business inventory every five seconds while visible,
+refreshes on return, shows read failures and labels recent stock/sale changes.
+The earlier separate inventory draft is preserved in Git stash history and must
+not be applied wholesale over this newer dashboard/API contract.
+
+Local presentation checks: `node --test web/test/*.test.ts` from the repository root.
+The broader lifecycle audit and demo acceptance gate are in
+`doc/agent-commerce-readiness.md`.
+
+Buying now recovers checkout from the request's saved reservation, uses request-specific
+cache keys and rejects cached receipts from another request. Pending payment hides
+repeat-payment controls; a confirmed receipt requires consumed/confirmed states.
+
+The live watch view includes an Anatomy-based isometric exchange figure. Seller stations filter the transcript; pagination handles additional sellers. Message packets play once for newly recorded moves, never for initial history or repeated polls. Reduced motion, offscreen views and reconnecting states suppress packet animation. No generated backdrop is included.
+
+Buyer and seller threads also expose expandable seller price histories. Comparison charts share a zero-based price scale, exclude buyer counters and retain expired prices only as history. These read-only visuals add no new permission or approval steps; MCP tools remain the source for agent actions. Anatomy attribution is in `components/iso/ANATOMY-LICENSE`.
+
+The watch screen defaults to a scan view: comparable offer panels and three latest moves. Full history, original messages, transport receipts and price histories expand on demand. The compact progress rail reflects saved request/payment state. Muted green marks the selected purchase; labels and icons preserve meaning without relying on color. Loading/matching motion is disabled under reduced motion; no model reasoning, fake activity or pretend voice controls are shown.
+
+The offer race charts recorded seller offers on a shared zero-based price axis. The horizontal axis is each seller's own offer sequence, not elapsed time or a claim of synchronized rounds. Buyer counters never enter the price lines. Select a point (pointer, keyboard, or offer picker) to inspect its amount, time and recorded message; seller selection also filters the shared activity feed. Historical/expired prices remain visible with status labels and never become payment approval. Endpoint motion follows data updates and respects reduced motion. Empty, single-offer, flat-price and uneven-history series are supported without external chart libraries or new MCP tools.
+
+The completion bridge loads the signed-in buyer's reservation receipt and verifies request, reservation, seller, currencies, totals and item arithmetic before showing “Deal complete.” A consumed reservation alone is insufficient: a confirmed order must also exist. It shows purchased quantities, not private seller stock totals or a fulfillment claim. A live confirmation transition gets one restrained animation; opening an already completed order is static. Receipt failures offer retry and never initiate checkout.
+
+Seller-owned inventory panels separately show the latest observed Available/Sold before→after counts, capped at three changed items. Available decreases at reservation; Sold increases on payment confirmation. These are snapshot differences (potentially multiple changes between refreshes), not a fabricated transaction ledger or buyer-visible stock feed. No database, payment or MCP permission changes are needed.
+
+Recovery always re-reads the authorized request from the backend. A best-effort, account/request-scoped browser checkpoint stores only event identifiers and last-view time (no tokens, message text, prices, budgets or floors). Reopening compares identifiers to say how many newly available records exist; it does not claim worker health or that records were generated while the browser was closed. Expired/corrupt checkpoints and blocked storage gracefully fall back to the server view. Opening history does not replay it as new traffic.
+
+“What happened” counts distinct sellers with recorded contact evidence, deduplicated seller offers plus buyer counters, same-seller price reduction, and payment state. Payment shows Verified only for the matching complete order receipt. It omits human-approval and tool-call counts because those are not instrumented. Evidence contains projected conversation records and delivery metadata, never seller floors or raw private tool results.

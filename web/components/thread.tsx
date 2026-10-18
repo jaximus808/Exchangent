@@ -4,6 +4,7 @@ import {ArrowRightLeft,CircleSlash,Radio} from 'lucide-react';
 import {ago,hopLabel,mine,speaker,type ConvMessage,type ConvSession,type Conversation,type Perspective} from '@/lib/conversation';
 import {money} from '@/lib/workspace';
 import './thread.css';
+import {PriceTrend} from './price-trend';
 
 function Hop({message}:{message:ConvMessage}) {
  const hop=hopLabel(message.delivery);
@@ -33,6 +34,7 @@ export function Thread({session,conversation,perspective,now,emptyText='Waiting 
  const reduced=useReducedMotion();
  const messages=session.messages;
  return <div className="thread" aria-live="polite">
+  <PriceTrend session={session}/>
   {messages.length===0&&<p className="thread-empty">{emptyText}</p>}
   <AnimatePresence initial={false}>
    {messages.map((m,i)=><motion.div key={`${m.kind}-${m.offer_id??m.counter_id??i}-${m.at}`} layout={!reduced} initial={reduced?false:{opacity:0,y:14,scale:.98}} animate={{opacity:1,y:0,scale:1}} transition={{duration:.32,ease:[.16,1,.3,1]}}>
