@@ -37,6 +37,21 @@ with the buyer, seller and worker tokens. The runner reads that file (`PRINCIPAL
 Logs print one line per delivery and per turn, for example `OFFER concedes 5%`, `COUNTER splits the difference`
 and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object per line instead.
 
+### Who the buyer agent negotiates for
+
+- **`buyer_agent` token** (`npm run agents:tokens --prefix backend`, file `backend/.agent-principals.json`): the
+  platform buyer agent. It negotiates every order whose buyer left `delegate_negotiation` on (the default), for
+  any account, using the worker feed's `route.delegated`.
+- **`buyer` token** (the demo seed): only that one buyer's orders.
+- **Orders the agent doesn't negotiate:** their buyer-bound events are acked without delivery, because that
+  person negotiates in chat. Their seller-bound events have no sender; with `TRANSPORT=inkbox` they are
+  delivered in-process.
+- **`SKIP_BACKLOG=1`:** acks events created before the runner started, without delivering them.
+- **Deal email:** when a buyer turn ends ready to reserve (the mock brain's `ready`, or Claude's
+  `READY TO RESERVE: <offer_id>`), `src/notify.ts` re-reads the order and emails the buyer once.
+  - The address comes from `buyer_email`, which only the buyer agent's view has.
+  - With `TRANSPORT=inkbox` it is sent from the buyer agent's own mailbox; with `local` it is only logged.
+
 ### Mock brain rules
 
 - **Seller.** It calls `get_negotiation` and `get_inventory`. For each requirement line it picks the cheapest
@@ -71,7 +86,8 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
    - brings tunnels online.
 2. **Identities on demand.** The first event that involves an agent creates its identity: `exchangent-buyer`,
    or `exchangent-<seller-name-slug>` for a seller. The runner then:
-   - mints the agent's key and enables A2A;
+   - mints the agent's key and enables A2A (on by default for identities your organization creates; the call
+     also returns the canonical Agent Card URL, `https://inkbox.ai/a2a/<handle>/card`, which is stored);
    - subscribes `a2a.task.created` and `a2a.task.message` to `https://<handle>.inkboxwire.com/inkbox/webhook`;
    - for sellers, registers the handle with `POST /api/v1/worker/sellers/:id/agent`.
 
@@ -84,11 +100,15 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
    error. To run more sellers, upgrade the plan (Developer allows 10) and raise the cap, or seed fewer sellers.
 4. **Tunnels.** Each identity's tunnel comes online inside this process through
    `@inkbox/sdk/tunnels/connect`, using an in-process handler. No public URL or port forwarding is needed.
+   `connect()` only bootstraps the tunnel; the runner then calls `serveForever()` (which reconnects with backoff)
+   and waits up to 30 seconds for `connected`. Only one process can hold a tunnel: a second process that
+   connects takes it over, so do not run the runner and the smoke test (below) at the same time.
    For each webhook, the handler:
    - checks `X-Inkbox-Timestamp` (300-second window) and the HMAC signature (SDK `verifyWebhook`, keyed with
      the identity's signing key);
    - dedupes by the webhook `id`;
-   - accepts only callers that are our own identities;
+   - accepts only callers that are our own identities (`data.sender`, else `data.caller`), and ignores its own
+     replies;
    - acks the A2A task in the background with `a2aReply(taskId, { intent: "complete" })`;
    - pushes the event into the agent's mailbox, which dedupes again by outbox event id.
 
@@ -109,6 +129,16 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
 
    Tunnel state is stored in `agents/.state/tunnels/<handle>/`. If the file is lost, the runner adopts the
    existing identities in your organization by handle and rotates their signing keys.
+7. **Smoke test.** Before the demo, check the live path with `npm run inkbox:smoke` (it reads `.env.local`).
+   It uses the same agent ids and handles as the runner, so it creates or reuses only the buyer identity and
+   the "Bay Desk Co" identity (`-- --seller "<name>"` picks another seller). It sends a synthetic
+   `session.opened` from the buyer to the seller and an `offer.created` back, through real A2A, tunnels and
+   signed webhooks, then prints PASS or FAIL with handles and timings. It never calls the backend; the seller's
+   handle registration is left for the runner. If a delivery times out, the script prints the recipient's
+   recent webhook deliveries from Inkbox's delivery log. You can also see each identity's A2A tasks and the
+   webhook delivery log in the [Inkbox Console](https://inkbox.ai/console). Exit codes are 0 for pass, 1 for
+   fail, and 2 for missing setup (no `INKBOX_API_KEY`, or no principals file because the demo has not been
+   seeded).
 
 ## BRAIN=claude
 
@@ -156,7 +186,8 @@ npm run typecheck    # tsc --noEmit
   - the A2A message shape and context reuse;
   - deduplication;
   - the identity cap and HTTP 402 handling;
-  - adopting existing identities after local state is lost.
+  - adopting existing identities after local state is lost;
+  - tunnels started with `serveForever()`, and replaying tasks that are still `submitted` after a restart.
 - **`claude.test.ts`:** checks how the command is built, and checks with `claude --help` that the installed CLI
   still accepts every flag. It never runs a real turn.
 - **`mock-brain.test.ts`:** checks the pricing and decision rules.

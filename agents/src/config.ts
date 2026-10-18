@@ -7,6 +7,11 @@ export const AGENTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.ur
 export interface BuyerPrincipal {
   actor_id: string;
   token: string;
+  /**
+   * "buyer_agent" (backend/scripts/agent-tokens.ts): the platform buyer agent, negotiating every order whose
+   * buyer delegated negotiation. "buyer" (the demo seed): one buyer's own token. Defaults to "buyer".
+   */
+  scope?: "buyer" | "buyer_agent";
 }
 
 export interface SellerPrincipal {
@@ -48,6 +53,8 @@ export interface Config {
   backendUrl: string;
   mcpUrl: string;
   pollMs: number;
+  /** SKIP_BACKLOG=1: ack events created before the runner started without delivering them. */
+  skipBacklog: boolean;
   principalsFile: string;
   principals: Principals;
   stateDir: string;
@@ -105,6 +112,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     backendUrl: normalizeBackendUrl(env.BACKEND_URL || principals.backend_url || "http://127.0.0.1:8787"),
     mcpUrl: env.MCP_URL || "http://127.0.0.1:3100/mcp",
     pollMs: Number(env.POLL_MS || 1000),
+    skipBacklog: ["1", "true", "yes"].includes((env.SKIP_BACKLOG || "").toLowerCase()),
     principalsFile,
     principals,
     stateDir: path.resolve(AGENTS_DIR, env.STATE_DIR || ".state"),

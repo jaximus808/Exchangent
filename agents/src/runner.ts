@@ -12,6 +12,7 @@ import type { InkboxTransportDeps } from "./transport/inkbox.ts";
 import { createMockBrain } from "./brains/mock.ts";
 import { createClaudeBrain } from "./brains/claude.ts";
 import { logger } from "./log.ts";
+import { DealNotifier } from "./notify.ts";
 
 const log = logger("runner");
 
@@ -66,6 +67,7 @@ export async function createRunner(config: Config, overrides: RunnerOverrides = 
       ? createClaudeBrain({ mcpUrl: config.mcpUrl, stateDir: config.stateDir, ...config.claude })
       : createMockBrain({ mcpFor }));
 
+  const notifier = new DealNotifier({ transport, mcpFor });
   const turns: TurnRecord[] = [];
   const onTurn = async (agent: Agent, event: TransportMessage) => {
     const t0 = Date.now();
@@ -73,6 +75,7 @@ export async function createRunner(config: Config, overrides: RunnerOverrides = 
     const result = await brain.turn(agent, event);
     turns.push({ agent: agent.id, kind: event.kind, eventId: event.id, result });
     log.info(`turn done -> ${result?.action}`, { agent: agent.id, ms: Date.now() - t0 });
+    if (agent.role === "buyer") await notifier.afterTurn(agent, event, result);
     return result;
   };
 
@@ -86,7 +89,7 @@ export async function createRunner(config: Config, overrides: RunnerOverrides = 
   registry.all().forEach(ensureAgent);
   registry.onNew = ensureAgent;
 
-  const dispatcher = new Dispatcher({ api, transport, registry, pollMs: config.pollMs });
+  const dispatcher = new Dispatcher({ api, transport, registry, pollMs: config.pollMs, since: config.skipBacklog ? new Date() : null });
 
   return {
     api,

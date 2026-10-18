@@ -226,6 +226,20 @@ test('full negotiation loop through HTTP on real Postgres',async t=>{
   assert.deepEqual(ok(await call('GET','/worker/events',P.worker.token)),[]);
   err(await call('POST',`/worker/events/${randomUUID()}/ack`,P.worker.token),'event_not_found',404);
  });
+
+ await t.test('a hold that can no longer open checkout is released before the next reservation',async()=>{
+  const [held]=await sql<{id: string}>("SELECT id FROM commerce_reservations WHERE request_id=$1 AND status='held'",[request.request_id]);
+  const desk=()=>call('GET','/seller/inventory',bay.token).then(r=>ok<InventoryItem[]>(r).find(i=>i.sku==='BAY-DESK-46')!.available);
+  assert.equal(await desk(),2);
+  // Still payable: a new reservation is refused and the hold keeps its stock.
+  err(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,undefined,randomUUID()),'request_already_reserved',409);
+  await sql("UPDATE commerce_reservations SET expires_at=now()+interval '10 minutes' WHERE id=$1",[held.id]);
+  err(await call('POST',`/reservations/${held.id}/checkout`,buyer,undefined,randomUUID()),'reservation_expired',409);
+  const r=ok<ReservationRow>(await call('POST',`/offers/${offer2.offer_id}/reservations`,buyer,{expected_total_cents:36000},randomUUID()));
+  assert.notEqual(r.id,held.id);assert.equal(r.status,'held');
+  assert.equal((await sql('SELECT status FROM commerce_reservations WHERE id=$1',[held.id]))[0].status,'expired');
+  assert.equal(await desk(),2,'released stock was taken again by the new hold, not double-counted');
+ });
 });
 
 test('buyer decline routes to the seller and blocks reserving that seller offer',async()=>{
@@ -265,6 +279,14 @@ test('re-seeding rotates tokens and keeps fixture IDs',async()=>{
  err(await call('GET','/me',P.buyer.token),'unauthorized',401);
  assert.equal(ok<RolePrincipal>(await call('GET','/me',again.buyer.token)).actor_id,P.buyer.actor_id);
  P=again;
+});
+
+test('seeding for an existing real account mints its buyer token and leaves the actor row alone',async()=>{
+ const [{id}]=await sql<{id: string}>("INSERT INTO commerce_actors(label,is_demo) VALUES('Exchangent user',false) RETURNING id");
+ const mine=await seed(db,{buyerId:id});
+ assert.equal(ok<RolePrincipal>(await call('GET','/me',mine.buyer.token)).actor_id,id);
+ assert.deepEqual(await sql('SELECT label,is_demo FROM commerce_actors WHERE id=$1',[id]),[{label:'Exchangent user',is_demo:false}]);
+ P=await seed(db);
 });
 
 test('anon and authenticated roles cannot touch new tables or functions',async()=>{

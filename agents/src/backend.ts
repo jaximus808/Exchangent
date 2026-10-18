@@ -26,6 +26,8 @@ export interface EventRoute {
   seller_id?: string;
   buyer_id?: string;
   request_id?: string;
+  /** The request's delegate_negotiation: the buyer lets the buyer agent negotiate. */
+  delegated?: boolean;
   /** Preferred Inkbox handle when the recipient's identity is created. */
   agent_handle?: string;
 }

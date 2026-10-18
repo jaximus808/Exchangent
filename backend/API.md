@@ -27,6 +27,10 @@ Send `Authorization: Bearer <token>`. Accepted credentials are:
    owns that business. Refresh tokens (`exr_`) are never accepted as Bearer credentials.
    Only SHA-256 digests of either token are stored.
 
+4. **Role tokens (64 hex).** Seeded or script-minted `commerce_principals` rows with scope
+   `buyer`, `buyer_agent`, `seller` or `worker`. They use the negotiation routes. The platform
+   buyer agent (`buyer_agent`) is described under [Buyer agent](#buyer-agent).
+
 Delegations last 5 minutes to 24 hours (default 1 hour). Humans can revoke them.
 Every API call rechecks expiry and revocation. A delegated agent cannot issue or
 revoke credentials, create new buy requests or broaden its own authority.
@@ -54,7 +58,7 @@ No responses are cached. The harness listens on loopback port 8787 by default.
 | `GET /api/v1/reservations/:id` | Owner or request-bound `request:read`; reservation and confirmed order |
 | `POST /api/v1/delegations` | User session only; issue a credential for an owned request or seller |
 | `DELETE /api/v1/delegations/:id` | User session only; revoke an owned credential |
-| `POST /webhooks/stripe` | Raw body verified with Stripe signature; no user Bearer token |
+| `POST /webhooks/stripe` | Raw body verified with Stripe signature; no user Bearer token. A confirmed order also emails the buyer once via Primitive when configured (`SETUP.md`); email errors never change the response |
 | `GET /api/v1/oauth/targets?client_id&redirect_uri` | User session only; consent screen data (below) |
 | `POST /api/v1/oauth/authorize` | User session only; issue a single-use authorization code (below) |
 | `POST /api/v1/oauth/token` | OAuth client authentication; RFC 6749 token endpoint (below) |
@@ -124,6 +128,66 @@ role tokens get `403 user_session_required` from the two consent routes.
 
 Code redemption and refresh rotation each run in one SQL transaction that locks the code or
 grant row. Concurrent requests therefore can't both receive tokens.
+
+## Buyer agent
+
+Migration: `migrations/20261018000400_buyer-agent.sql`. Code: `src/negotiation.ts` (`actingBuyer`, `canRead`).
+One platform principal, scope `buyer_agent`, negotiates every request whose buyer left
+`delegate_negotiation` on (the default; `POST /buy-requests` accepts `delegate_negotiation: false`).
+It acts **as that request's buyer**: the same budget check, the same idempotency-key space, and
+counters stored with the request's `buyer_id`. It can't do anything else.
+
+`GET /api/v1/me` returns `{ scope: "buyer_agent", actor_id: <platform agent actor>, seller_id: null, label }`.
+
+| Route (negotiation routes, `/api/v1`) | `buyer_agent` behaviour |
+| --- | --- |
+| `GET /buy-requests/:id` (MCP `get_buy_order`) | Full buyer view, including `budget_cents` and `target_cents`, plus `buyer_email`: the buyer's InsForge email, or `null` for demo actors without an account. Only the buyer agent gets `buyer_email`. Buyers don't get it, and sellers never do (it is also stripped from every seller view) |
+| `GET /buy-requests/:id/offers` (`list_offers`) | Buyer view, as for the buyer |
+| `GET /sessions/:id` | Buyer view (`role: "buyer"`) |
+| `POST /sessions/:id/counters` (`counter_offer`) | As the buyer. `budget_exceeded`, `stale_offer`, `not_your_turn` and `session_closed` apply unchanged |
+| `POST /sessions/:id/decline` (`decline_seller`) | As the buyer (`declined_by: "buyer"`) |
+| Request with `delegate_negotiation = false` | `403 forbidden` on every route above. The message says that the buyer did not delegate negotiation of this request |
+| Unknown request or session ID | `404 request_not_found` / `session_not_found`, the same as for a buyer |
+| `POST /buy-requests`, reservations, checkout, reservation status, every `/seller/*` and `/worker/*` route, seller offers | `403 forbidden` ("Requires buyer scope; this token has buyer_agent scope") |
+
+Role tokens have no list-my-requests route (`GET /buy-requests` is `404 not_found` for every role token).
+The runner learns about requests from the worker feed. `GET /worker/events` routes now carry
+`route.delegated` (boolean, the request's `delegate_negotiation`). The runner's buyer agent skips
+events where it is `false`, because that buyer negotiates in chat.
+
+SQL helpers (project_admin only, like the other RPCs):
+- `commerce_delegated_buyer(p_request, p_session)` returns `{ request_id, buyer_id }`. It raises
+  `forbidden` if the request isn't delegated.
+- `commerce_delegated_buyer_email(p_request)` is a narrow `SECURITY DEFINER` function that reads
+  `auth.users`. It returns `{ request_id, email }`, only for delegated requests.
+- `commerce_rotate_agent_principals(p_principals, p_hours)` runs in one transaction. It revokes every
+  earlier `agents:%` principal and inserts the new hashes. It refuses any label outside `agents:` and
+  any scope other than `buyer_agent`, `seller` or `worker`.
+
+### Minting runner tokens: `npm run agents:tokens`
+
+`scripts/agent-tokens.ts` works against `DATABASE_URL` or InsForge (`backend/.env.local`). It is
+additive: it never resets stock or prices and never touches the demo seed's `seed:%` principals, and
+re-running `seed:negotiation` leaves its tokens alone. Each run:
+
+- creates the platform buyer-agent actor (`seedId('buyer-agent')`, label "Exchangent buyer agent")
+  and the worker actor if they are missing;
+- revokes earlier `agents:%` tokens, then mints one `buyer_agent` token (`agents:buyer-agent`), one
+  `worker` token (`agents:worker`) and one `seller` token per business (`agents:seller:<id>`). Each
+  seller token acts as that business's current owner;
+- writes `backend/.agent-principals.json` (mode 600, gitignored) in the runner's shape:
+  `{ backend_url, buyer: { actor_id, token, scope: "buyer_agent" }, sellers: [{ seller_id, name, token }], worker: { token } }`.
+  `backend_url` is `COMMERCE_BASE_URL`, defaulting to `http://127.0.0.1:8787`. Set
+  `AGENT_PRINCIPALS_FILE` to write it elsewhere. Only a summary is printed, never tokens.
+
+Options: repeat `--seller "<name or id>"` to choose businesses. The default is the three seeded demo
+sellers; if they're missing, run `seed:negotiation` once first. `--hours N` sets the lifetime
+(default 72, maximum 8760).
+
+```sh
+npm run agents:tokens --prefix backend
+npm run agents:tokens --prefix backend -- --seller "Bay Desk Co" --seller <seller-uuid> --hours 24
+```
 
 ## MCP and dashboard integration
 

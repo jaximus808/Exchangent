@@ -5,6 +5,12 @@
 // identity's own tunnel (https://<handle>.inkboxwire.com/inkbox/webhook), and an in-process tunnel
 // handler receives deliveries. Sends go from the counterparty agent's identity to the recipient's, one
 // A2A context per negotiation session, messageId = outbox event id (Inkbox idempotency key).
+//
+// Checked against @inkbox/sdk 0.7.19 and https://inkbox.ai/docs (A2A, webhooks, signing keys, tunnels):
+// - connect() only bootstraps a tunnel; serveForever() is what opens and keeps the data-plane connection.
+// - The A2A protocol endpoint needs a claimed identity's agent-scoped key (a2aClient() checks whoami).
+// - The canonical card URL comes back from the A2A settings (a2aEnable() -> cardUrl).
+// - Webhook `data.caller` is the task's requester; `data.sender` (optional) is the message's author.
 
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -25,6 +31,7 @@ import type { MessageHandler, PublicPayload, Transport, TransportMessage } from 
 import type { Agent } from "../agents.ts";
 import type { EventKind, WorkerEvent } from "../backend.ts";
 import { logger, money, short } from "../log.ts";
+import type { EmailMessage } from "../notify.ts";
 
 const log = logger("transport:inkbox");
 
@@ -61,6 +68,8 @@ export interface InkboxTransportOptions extends InkboxTransportDeps {
   identityCap?: number;
   handlePrefix?: string;
   stateDir: string;
+  /** how long to wait for a new tunnel to report "connected" before going on (Inkbox retries deliveries) */
+  tunnelConnectTimeoutMs?: number;
 }
 
 /** One provisioned identity, persisted in .state/identities.json. */
@@ -71,6 +80,8 @@ export interface IdentityRecord {
   created_at: string;
   agent_api_key?: string;
   a2a_enabled?: boolean;
+  /** canonical Agent Card URL from the A2A settings (https://inkbox.ai/a2a/<handle>/card) */
+  card_url?: string;
   subscription_id?: string;
   signing_key?: string;
   registered?: boolean;
@@ -206,6 +217,7 @@ export class InkboxTransport implements Transport {
   identityCap: number;
   handlePrefix: string;
   stateDir: string;
+  tunnelConnectTimeoutMs: number;
   backend: SellerRegistrar | undefined;
   sdkPromise: Promise<InkboxSdk>;
   now: () => number;
@@ -215,13 +227,14 @@ export class InkboxTransport implements Transport {
   /** Set once Inkbox answers 402 (plan limit), so later events fail fast. */
   planLimitError?: string;
 
-  constructor({ apiKey, baseUrl, a2aBaseUrl = "https://inkbox.ai", identityCap = 3, handlePrefix = "exchangent", stateDir, backend, sdk, now = () => Date.now() }: InkboxTransportOptions) {
+  constructor({ apiKey, baseUrl, a2aBaseUrl = "https://inkbox.ai", identityCap = 3, handlePrefix = "exchangent", stateDir, tunnelConnectTimeoutMs = 30_000, backend, sdk, now = () => Date.now() }: InkboxTransportOptions) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
     this.a2aBaseUrl = a2aBaseUrl;
     this.identityCap = identityCap;
     this.handlePrefix = handlePrefix;
     this.stateDir = stateDir;
+    this.tunnelConnectTimeoutMs = tunnelConnectTimeoutMs;
     this.backend = backend;
     this.sdkPromise = sdk ? Promise.resolve(sdk) : loadSdk();
     this.now = now;
@@ -301,23 +314,34 @@ export class InkboxTransport implements Transport {
       log.info("agent-scoped key minted", { agent: agent.id, handle: rec.handle });
     }
 
-    if (!rec.a2a_enabled) {
+    if (!rec.a2a_enabled || !rec.card_url) {
+      // A2A is on by default for claimed identities; enabling is idempotent and returns the canonical card URL.
       const me = await this.#agentIdentity(agent.id);
-      await me.a2aEnable();
+      const settings = await me.a2aEnable();
       rec.a2a_enabled = true;
+      if (settings?.cardUrl) rec.card_url = settings.cardUrl;
       this.state.save();
     }
 
     if (!rec.subscription_id || !rec.signing_key) {
       const url = `https://${rec.public_host}${WEBHOOK_PATH}`;
-      const existing = await admin.webhooks.subscriptions.list({ agentIdentityId: rec.identity_id, url }).catch(() => []);
+      const subs = admin.webhooks.subscriptions;
+      const existing = await subs.list({ agentIdentityId: rec.identity_id, url }).catch(() => []);
       let signingKey: string | null = null;
       if (existing.length) {
         rec.subscription_id = existing[0].id;
       } else {
-        const sub = await admin.webhooks.subscriptions.create({ agentIdentityId: rec.identity_id, url, eventTypes: A2A_EVENT_TYPES });
-        rec.subscription_id = sub.id;
-        signingKey = sub.signingKey;
+        try {
+          const sub = await subs.create({ agentIdentityId: rec.identity_id, url, eventTypes: A2A_EVENT_TYPES });
+          rec.subscription_id = sub.id;
+          signingKey = sub.signingKey; // only set on the identity's first subscription
+        } catch (err) {
+          // 409: a subscription for this URL already selects these events but the legacy (unscoped) list hid it.
+          if (statusCode(err) !== 409) throw err;
+          const all = await subs.list({ agentIdentityId: rec.identity_id, url, scope: "identity" });
+          if (!all.length) throw err;
+          rec.subscription_id = all[0].id;
+        }
       }
       if (!signingKey) {
         // The key is shown only once; if we don't have it, rotate to get a fresh one.
@@ -394,26 +418,52 @@ export class InkboxTransport implements Transport {
     return this.#a2aClients.get(agentId)!; // set just above if missing
   }
 
-  async #card(fromId: string, handle: string): Promise<A2AResolvedTarget> {
-    const key = `${fromId}->${handle}`;
+  async #card(fromId: string, to: IdentityRecord): Promise<A2AResolvedTarget> {
+    const key = `${fromId}->${to.handle}`;
     if (!this.#cards.has(key)) {
       const a2a = await this.#a2a(fromId);
-      this.#cards.set(key, await a2a.fetchCard(`${this.a2aBaseUrl}/a2a/${handle}/card`));
+      // The card must be on the SDK's API origin (baseUrl) or the client will not attach the agent key to the RPC.
+      this.#cards.set(key, await a2a.fetchCard(to.card_url || `${this.a2aBaseUrl}/a2a/${to.handle}/card`));
     }
     return this.#cards.get(key)!; // set just above if missing
   }
 
+  /**
+   * Bring the identity's tunnel online in this process. connect() only bootstraps (finds the tunnel, writes
+   * its state file); serveForever() opens the data-plane connection and reconnects with backoff. Waits up to
+   * tunnelConnectTimeoutMs for "connected"; after that Inkbox's webhook retries cover the gap.
+   */
   async #listen(agent: Agent, rec: IdentityRecord): Promise<void> {
     const { connect } = await this.#sdk();
     const admin = await this.#admin();
+    let settle: (connected: boolean) => void = () => {};
+    const ready = new Promise<boolean>((resolve) => { settle = resolve; });
     const listener = await connect(admin, {
       name: rec.handle,
       handler: (req) => this.handleWebhook(agent.id, req),
       installSignalHandlers: false,
       stateDir: path.join(this.stateDir, "tunnels", rec.handle),
+      onStatus: (status) => {
+        if (status === "connected") settle(true);
+        else log.info("tunnel status", { agent: agent.id, handle: rec.handle, status });
+      },
     });
     this.#listeners.set(agent.id, listener);
-    log.info("tunnel online", { agent: agent.id, url: listener.publicUrl });
+    listener.serveForever().then(
+      () => settle(false),
+      (err: unknown) => {
+        // Fatal: bad key, tunnel removed, or another process took the tunnel over (superseded).
+        log.error("tunnel stopped", { agent: agent.id, handle: rec.handle, error: (err as Error | null | undefined)?.message });
+        if (this.#listeners.get(agent.id) === listener) this.#listeners.delete(agent.id);
+        settle(false);
+      },
+    );
+    const timer = setTimeout(() => settle(false), this.tunnelConnectTimeoutMs);
+    timer.unref?.();
+    const connected = await ready;
+    clearTimeout(timer);
+    if (connected) log.info("tunnel online", { agent: agent.id, url: listener.publicUrl });
+    else log.warn("tunnel not connected yet; Inkbox retries webhook deliveries", { agent: agent.id, url: listener.publicUrl, status: listener.status });
   }
 
   /** Tunnel handler: verify, dedupe, ack the A2A task fast, push into the agent mailbox. */
@@ -436,7 +486,9 @@ export class InkboxTransport implements Transport {
     this.#seenWebhooks.add(body.id);
     if (!A2A_EVENT_TYPES.includes(body.event_type)) return new Response("ignored");
 
-    const callerHandle = body.data?.caller?.handle;
+    // data.sender is the message author (e.g. our own reply on a2a.task.message); data.caller is the requester.
+    const callerHandle = body.data?.sender?.handle ?? body.data?.caller?.handle;
+    if (callerHandle && callerHandle === rec?.handle) return new Response("ignored"); // our own reply
     const fromId = Object.entries(this.state.data.identities).find(([, r]) => r.handle === callerHandle)?.[0];
     if (!fromId) {
       log.warn("webhook from unknown caller ignored", { agent: agentId, caller: callerHandle });
@@ -471,7 +523,8 @@ export class InkboxTransport implements Transport {
       const full = await me.a2aTask(task.id);
       const fromId = Object.entries(this.state.data.identities).find(([, r]) => r.handle === full.caller?.handle)?.[0];
       if (!fromId) continue;
-      const msg = messageFromParts(full.messages?.at(-1)?.parts, fromId);
+      // Newest message that carries our data part (the caller's event message).
+      const msg = (full.messages || []).toReversed().map((m) => messageFromParts(m.parts, fromId)).find(Boolean);
       if (!msg) continue;
       this.#completeTask(agent.id, task.id);
       log.info("caught up queued task", { agent: agent.id, kind: msg.kind, event: msg.id });
@@ -482,12 +535,20 @@ export class InkboxTransport implements Transport {
   /** Send one outbox event as an A2A message from fromAgent's identity to toAgent's identity. */
   async send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<void> {
     if (!fromAgent) {
-      throw new Error(`cannot tell which seller sent ${event.kind}; the backend should set route.seller_id on buyer-bound events`);
+      if (toAgent.role === "buyer") {
+        throw new Error(`cannot tell which seller sent ${event.kind}; the backend should set route.seller_id on buyer-bound events`);
+      }
+      // The buyer is a person in chat, not an identity of ours: there is no sender, so deliver in-process.
+      const handler = this.#handlers.get(toAgent.id);
+      if (!handler) throw new Error(`no receiver for ${toAgent.id}`);
+      await handler(toMessage(null, event));
+      log.info("delivered in-process (buyer has no agent)", { to: toAgent.id, kind: event.kind, event: event.id });
+      return;
     }
     await this.ensureIdentity(fromAgent);
     const toRec = await this.ensureIdentity(toAgent, event.route?.agent_handle);
     const a2a = await this.#a2a(fromAgent.id);
-    const target = await this.#card(fromAgent.id, toRec.handle);
+    const target = await this.#card(fromAgent.id, toRec);
     const sessionId = event.payload?.session_id;
     const contextId = sessionId ? this.state.data.contexts[sessionId] : undefined;
     const result = await a2a.send(target, {
@@ -504,8 +565,23 @@ export class InkboxTransport implements Transport {
     log.info("a2a sent", { from: fromAgent.id, to: toRec.handle, kind: event.kind, event: event.id, context: short(newContext || contextId) });
   }
 
+  /** Send from the agent's own Inkbox mailbox (every identity has one). */
+  async email(from: Agent, message: EmailMessage): Promise<void> {
+    await this.ensureIdentity(from);
+    const me = await this.#agentIdentity(from.id);
+    await me.sendEmail({
+      to: message.to,
+      subject: message.subject,
+      bodyText: message.text,
+      bodyHtml: message.html,
+      idempotencyKey: message.idempotencyKey,
+    });
+    log.info("email sent", { from: this.identityFor(from.id)?.handle, subject: message.subject });
+  }
+
   async close(): Promise<void> {
-    for (const l of this.#listeners.values()) await l.close().catch(() => {});
+    const listeners = [...this.#listeners.values()];
     this.#listeners.clear();
+    for (const l of listeners) await l.close().catch(() => {});
   }
 }

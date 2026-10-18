@@ -7,6 +7,7 @@
   },
   "scripts": {
     "start": "node src/main.ts",
+    "inkbox:smoke": "node --env-file-if-exists=.env.local scripts/inkbox-smoke.ts",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

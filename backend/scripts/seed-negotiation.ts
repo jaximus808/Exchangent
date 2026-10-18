@@ -51,8 +51,11 @@ export async function seed(db: Db,{buyerId=seedId('buyer'),baseUrl='http://127.0
  const check=async(label: string,promise: PromiseLike<DbResult>)=>{const {error}=await promise;if(error) throw new Error(`Seed ${label}: ${error.message}`);};
  const t=db.database;
  const workerId=seedId('worker');
+ // An existing buyer (a real account via DEMO_BUYER_ID) keeps its row: the seed only mints its agent token.
+ const {data:existing,error}=await t.from('commerce_actors').select('id').eq('id',buyerId).limit(1);
+ if(error) throw new Error(`Seed buyer lookup: ${error.message}`);
  await check('actors',t.from('commerce_actors').upsert([
-  {id:buyerId,label:'Demo buyer (negotiation seed)',is_demo:true},
+  ...(existing?.length?[]:[{id:buyerId,label:'Demo buyer (negotiation seed)',is_demo:true}]),
   {id:workerId,label:'Exchangent agent worker',is_demo:true},
   ...SELLERS.map(s=>({id:seedId(`owner:${s.slug}`),label:`${s.name} owner`,is_demo:true})),
  ],{onConflict:'id'}));
@@ -84,7 +87,8 @@ if(import.meta.url===pathToFileURL(process.argv[1]).href) {
   const {asDb}=await import('../src/commerce.ts');
   db=asDb(createAdminClient({baseUrl:process.env.INSFORGE_URL,apiKey:process.env.INSFORGE_API_KEY}));
  }
- // Reuse the legacy demo buyer so COMMERCE_DEMO_TOKEN and the seeded buyer token act as the same buyer.
+ // DEMO_BUYER_ID: mint the buyer agent's token for this actor, e.g. your own account's actor, so the agent
+ // runner's buyer agent negotiates the orders you create in chat.
  const principals=await seed(db,{buyerId:process.env.DEMO_BUYER_ID||undefined,baseUrl:process.env.COMMERCE_BASE_URL||undefined});
  const file=process.env.DEMO_PRINCIPALS_FILE?pathToFileURL(process.env.DEMO_PRINCIPALS_FILE):new URL('../.demo-principals.json',import.meta.url);
  await writeFile(file,JSON.stringify(principals,null,2)+'\n',{mode:0o600});

@@ -16,7 +16,9 @@
     "seed:negotiation": "node --env-file-if-exists=.env.local scripts/seed-negotiation.ts",
     "oauth:client": "node --env-file-if-exists=.env.local scripts/oauth-client.ts",
     "assign:seller": "node --env-file-if-exists=.env.local scripts/assign-seller.ts",
-    "test:db": "sh test/sql/run.sh"
+    "agents:tokens": "node --env-file-if-exists=.env.local scripts/agent-tokens.ts",
+    "test:db": "sh test/sql/run.sh",
+    "local:server": "node scripts/local-server.ts"
   },
   "dependencies": {
     "@insforge/sdk": "1.5.2",

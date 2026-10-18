@@ -12,6 +12,7 @@ import type { Agent } from "../agents.ts";
 import type { EventKind, WorkerEvent } from "../backend.ts";
 import type { Config } from "../config.ts";
 import type { InkboxTransportDeps } from "./inkbox.ts";
+import type { EmailMessage } from "../notify.ts";
 
 export const PUBLIC_PAYLOAD_KEYS = ["session_id", "request_id", "offer_id", "counter_id", "total_cents", "note"] as const;
 
@@ -42,6 +43,8 @@ export interface Transport {
   start(agents: Agent[]): Promise<void>;
   send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<void>;
   onMessage(agent: Agent, handler: MessageHandler): void;
+  /** Email a human from this agent (Inkbox: the identity's own mailbox; local: logged, not sent). */
+  email(from: Agent, message: EmailMessage): Promise<void>;
   close(): Promise<void>;
 }
 

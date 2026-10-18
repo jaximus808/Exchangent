@@ -38,6 +38,7 @@ test("local transport + mock brain negotiate to 'ready to reserve'", async (t) =
     backendUrl: backend.url,
     mcpUrl: mcp.url,
     pollMs: 10,
+    skipBacklog: false,
     principals: market.principalsJson(backend.url),
     principalsFile: "/nonexistent",
     stateDir: mkdtempSync(path.join(tmpdir(), "agents-e2e-")),

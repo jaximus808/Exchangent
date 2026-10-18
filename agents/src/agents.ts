@@ -16,6 +16,8 @@ export interface BuyerAgent extends AgentBase {
   id: "buyer";
   role: "buyer";
   buyerId: string;
+  /** true: negotiates every delegated order (buyer_agent token); false: only buyerId's orders. */
+  platform: boolean;
 }
 
 export interface SellerAgent extends AgentBase {
@@ -36,7 +38,15 @@ export function slugify(s: string | null | undefined): string {
 }
 
 export function buyerAgent(buyer: BuyerPrincipal): BuyerAgent {
-  return { id: "buyer", role: "buyer", name: "Buyer agent", slug: "buyer", token: buyer.token, buyerId: buyer.actor_id };
+  return {
+    id: "buyer",
+    role: "buyer",
+    name: "Buyer agent",
+    slug: "buyer",
+    token: buyer.token,
+    buyerId: buyer.actor_id,
+    platform: buyer.scope === "buyer_agent",
+  };
 }
 
 export function sellerAgent(seller: SellerPrincipal): SellerAgent {
