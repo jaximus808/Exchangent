@@ -167,6 +167,21 @@ To turn it on:
    (logged, the webhook still succeeds).
 4. Set `PRIMITIVE_API_KEY` and `PRIMITIVE_FROM` in Vercel (Production) and in `backend/.env.local`, then redeploy.
 
+## Self-serve businesses and the seller agent
+
+Spec: `doc/signup-contract.md`. Routes: `API.md` ("Businesses and the seller agent").
+
+To turn it on:
+1. Apply `migrations/20261018000600_self-serve-signup.sql` to InsForge, after `20261018000500`.
+   - It is additive: it adds two `commerce_sellers` columns, six RPCs and one trigger, and re-creates
+     `commerce_worker_events` and `commerce_ack_event`.
+   - It adds no unique index on business names, because production already has duplicate test-seller
+     names. It applies cleanly on top of them.
+2. Deploy the backend.
+3. Signed-in people can then register businesses from the consent page or with the `register_business`
+   MCP tool, and stock them. The runner's worker token mints seller agent tokens on demand. No seeding or
+   `agents:tokens` run is needed for a new business.
+
 ## Remaining integration work
 
 - Port the handlers to the agreed Next.js layout and connect the frontend's

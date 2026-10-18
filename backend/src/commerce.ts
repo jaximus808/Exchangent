@@ -34,6 +34,7 @@ const isHandled = (event: Stripe.Event): event is CheckoutEvent => handled.has(e
 export interface CheckoutLink { reservation_id: string; session_id: string; url: string | null }
 export interface ReceiptItem { title: string; quantity: number; unit_cents: number }
 export interface ReservationStatusView {
+  request_id?: string;
   reservation_id: string; status: ReservationRow['status']; total_cents: number; currency: string;
   seller: Pick<SellerRow,'id'|'name'>; items: ReceiptItem[]; subtotal_cents: number;
   delivery_cents: number; tax_cents: number; expires_at: string; order: OrderSummary | null;
@@ -80,7 +81,16 @@ export class Commerce {
     } catch(e) {console.error(`release_stale_holds failed: ${(e as Error).message}`);}
   }
   async checkout(buyer: string, id: string): Promise<CheckoutLink> {
-    const r=await this.rpc<ReservationRow>('commerce_begin_checkout',{p_buyer:buyer,p_reservation:id});
+    let r: ReservationRow;
+    try {r=await this.rpc<ReservationRow>('commerce_begin_checkout',{p_buyer:buyer,p_reservation:id});}
+    catch(error) {
+      // Only releases holds with no attempted Checkout creation. Bound or ambiguous
+      // Stripe sessions remain protected until authoritative reconciliation.
+      if(error instanceof CommerceError&&error.code==='reservation_expired') {
+        await this.releaseStaleHolds();
+      }
+      throw error;
+    }
     if(r.stripe_session_id) return {reservation_id:r.id,session_id:r.stripe_session_id,url:r.checkout_url};
     // Parameters are persisted or deterministic, so concurrent/restarted calls use
     // identical parameters with the same Stripe idempotency key.
@@ -154,7 +164,7 @@ export class Commerce {
     const {data,error}=await this.db.database.from('commerce_orders')
       .select('id,status,total_cents,currency,created_at').eq('reservation_id',id).limit(1);
     if(error) throw new CommerceError('database_error',503);
-    return {reservation_id:r.id,status:r.status,total_cents:r.total_cents,currency:r.currency,
+    return {request_id:r.request_id,reservation_id:r.id,status:r.status,total_cents:r.total_cents,currency:r.currency,
       seller:{id:seller.id,name:seller.name},items:lines,subtotal_cents:subtotal,
       delivery_cents:offer.delivery_cents,tax_cents:offer.tax_cents,expires_at:r.expires_at,
       order:(data?.[0] as OrderSummary | undefined)??null};

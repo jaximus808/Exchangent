@@ -17,6 +17,8 @@ export type KnownErrorCode =
  | 'stale_offer' | 'not_your_turn' | 'session_closed' | 'below_floor' | 'out_of_stock' | 'budget_exceeded'
  | 'requirements_mismatch' | 'offer_expired' | 'seller_disabled' | 'request_already_reserved'
  | 'reservation_expired' | 'reservation_not_payable' | 'payment_pending' | 'session_conflict'
+ // Self-serve businesses and the platform seller agent (migrations/20261018000600_self-serve-signup.sql)
+ | 'business_name_taken' | 'business_limit' | 'not_delegated'
  // Payments
  | 'test_key_required' | 'test_session_required' | 'session_mismatch' | 'payment_mismatch' | 'invalid_signature'
  | 'live_event_rejected' | 'reservation_binding_missing'
@@ -130,6 +132,7 @@ export interface CounterJson {
  version: number; created_at: string;
 }
 export interface SessionJson {
+ opening_total_cents?: number;
  session_id: string; request_id: string; seller_id: string; seller_name: string;
  seller: { service_area: string; delivery_cents: number; delivery_days: number; agent_handle: string | null };
  status: SessionStatus; turn: Turn; version: number; rounds: number;
@@ -166,19 +169,38 @@ export interface DelegatedBuyer { request_id: string; buyer_id: string }
 /** commerce_delegated_buyer_email: the buyer's InsForge email (buyer agent only); null for demo actors. */
 export interface DelegatedBuyerEmail { request_id: string; email: string | null }
 
+// ---------- Businesses (self-serve sign-up) ----------
+/** commerce_business_json: the owner's (or seller agent's) view of one business. Never shown to buyers. */
+export interface BusinessJson {
+ seller_id: string; name: string; service_area: string; delivery_cents: number; delivery_days: number;
+ /** Owner's "let my agent negotiate": the platform seller agent may negotiate for this business. */
+ delegate_negotiation: boolean; enabled: boolean; agent_handle: string | null; created_at: string;
+ /** The owner's account email; null for demo actors without an account. */
+ owner_email: string | null;
+}
+/** POST /businesses with a buyer token: the new business plus what the person does next. */
+export interface RegisteredBusiness { business: BusinessJson; next: string }
+/** POST /worker/sellers/:id/token. `token` is plaintext, returned once; only its hash is stored. */
+export interface SellerAgentToken { token: string; seller_id: string; name: string; expires_at: string; agent_handle: string | null }
+
 // ---------- Outbox (worker feed) ----------
-export type OutboxKind = 'session.opened' | 'offer.created' | 'counter.created' | 'session.declined';
+/** Negotiation kinds route by session; 'order.confirmed' is the seller's sale notice (always to_role 'seller'). */
+export type OutboxKind = 'session.opened' | 'offer.created' | 'counter.created' | 'session.declined' | 'order.confirmed';
 export interface OutboxPayloads {
  'session.opened': { session_id: string; request_id: string };
  'offer.created': { session_id: string; request_id: string; offer_id: string; total_cents: number; note: string | null };
  'counter.created': { session_id: string; counter_id: string; total_cents: number; note: string | null };
  'session.declined': { session_id: string };
+ 'order.confirmed': { order_id: string; reservation_id: string; request_id: string; seller_id: string;
+  total_cents: number; currency: string; title: string | null };
 }
 export type WorkerEvent = { [K in OutboxKind]: {
  id: string; kind: K; created_at: string; payload: OutboxPayloads[K];
- route: { to_role: Turn; request_id?: string; seller_id?: string; buyer_id?: string; agent_handle?: string;
+ route: { to_role: K extends 'order.confirmed' ? 'seller' : Turn; request_id?: string; seller_id?: string; buyer_id?: string; agent_handle?: string;
   /** The request's delegate_negotiation: the platform buyer agent negotiates it. */
-  delegated: boolean };
+  delegated: boolean;
+  /** The seller's delegate_negotiation: the platform seller agent negotiates for it. */
+  seller_delegated: boolean };
 } }[OutboxKind];
 export interface EventAck { id: string; kind: OutboxKind; delivered_at: string }
 export interface AgentHandle { seller_id: string; agent_handle: string }

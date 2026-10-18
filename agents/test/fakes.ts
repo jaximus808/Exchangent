@@ -36,6 +36,11 @@ export interface FakeSeller {
   token: string;
   delivery_cents: number;
   inventory: InventoryRow[];
+  /** Self-serve business: not in the principals file; the runner mints its token with the worker token. */
+  dynamic?: boolean;
+  /** delegate_negotiation (default true). */
+  delegated?: boolean;
+  owner_email?: string | null;
 }
 
 export interface FakeRequest {
@@ -116,7 +121,22 @@ type BuyOrderArgs = { request_id: string };
 type CounterArgs = { session_id: string; expected_version: number; total_cents: number; note: string };
 type ToolFn = (p: Principal, args: Record<string, unknown>) => FakeResult;
 
-export function createMarket({ tamperTotals = false }: { tamperTotals?: boolean } = {}) {
+/** A business someone registered and stocked through MCP (doc/signup-contract.md). */
+export const SELF_SERVE_SELLER: FakeSeller = {
+  seller_id: "s-jaxon",
+  name: "Jaxon's Desks",
+  token: "tok-jaxon",
+  delivery_cents: 1000,
+  dynamic: true,
+  delegated: true,
+  owner_email: "owner@example.com",
+  inventory: [
+    { inventory_id: "jax-desk", title: "Walnut desk 44in", category: "desk", attributes: { width_in: 44 }, list_cents: 22000, floor_cents: 16000, available: 2 },
+    { inventory_id: "jax-chair", title: "Task chair", category: "chair", attributes: { ergonomic: true }, list_cents: 14000, floor_cents: 9000, available: 2 },
+  ],
+};
+
+export function createMarket({ tamperTotals = false, selfServe = false }: { tamperTotals?: boolean; selfServe?: boolean } = {}) {
   const buyer = { actor_id: "buyer-1", token: "tok-buyer" };
   const worker = { token: "tok-worker" };
   const sellers: FakeSeller[] = [
@@ -143,6 +163,8 @@ export function createMarket({ tamperTotals = false }: { tamperTotals?: boolean 
       ],
     },
   ];
+  if (selfServe) sellers.push(structuredClone(SELF_SERVE_SELLER));
+  const mints: string[] = [];
 
   const requests = new Map<string, FakeRequest>();
   const sessions = new Map<string, FakeSession>();
@@ -167,8 +189,29 @@ export function createMarket({ tamperTotals = false }: { tamperTotals?: boolean 
 
   function emit(kind: EventKind, payload: EventPayload, route: EventRoute) {
     // Like commerce_worker_events: route carries request_id and seller_id for every event.
-    const request_id = sessions.get(payload.session_id)?.request_id;
-    outbox.push({ id: randomUUID(), kind, created_at: now(), payload, route: { ...route, request_id }, delivered: false });
+    const request_id = payload.session_id ? sessions.get(payload.session_id)?.request_id : payload.request_id;
+    const seller_delegated = sellerById(route.seller_id ?? sessions.get(payload.session_id ?? "")?.seller_id)?.delegated !== false;
+    outbox.push({ id: randomUUID(), kind, created_at: now(), payload, route: { ...route, request_id, seller_delegated }, delivered: false });
+  }
+
+  /** The buyer paid for a reservation of this offer: like commerce_apply_payment's order.confirmed row. */
+  function confirmOrder(offerId: string) {
+    const o = offers.get(offerId)!;
+    const s = sessions.get(o.session_id)!;
+    const r = requests.get(s.request_id)!;
+    r.status = "confirmed";
+    const order_id = randomUUID();
+    emit("order.confirmed", { order_id, reservation_id: randomUUID(), request_id: r.request_id, seller_id: s.seller_id, total_cents: o.total_cents, currency: "usd", title: r.title }, { to_role: "seller", seller_id: s.seller_id, buyer_id: r.buyer_id });
+    return order_id;
+  }
+
+  /** POST /worker/sellers/:id/token: only for delegated businesses. */
+  function mintSellerToken(sellerId: string): { status: number; body: unknown } {
+    const s = sellers.find((x) => x.seller_id === sellerId);
+    if (!s) return { status: 404, body: { error: { code: "seller_not_found", message: "no such seller" } } };
+    if (s.delegated === false) return { status: 403, body: { error: { code: "not_delegated", message: "owner negotiates in chat" } } };
+    mints.push(sellerId);
+    return { status: 200, body: { data: { token: s.token, seller_id: s.seller_id, name: s.name, expires_at: new Date(Date.now() + 24 * 3600_000).toISOString(), agent_handle: null } } };
   }
 
   function createBuyOrder({ title, requirements, budget_cents, target_cents }: { title: string; requirements: Requirements; budget_cents: number; target_cents: number }) {
@@ -221,6 +264,11 @@ export function createMarket({ tamperTotals = false }: { tamperTotals?: boolean 
         history,
         next: s.turn === "seller" ? "Make an offer with make_offer." : "Wait for the buyer.",
       };
+    },
+    get_business(p: Principal): FakeResult {
+      if (p.scope !== "seller") return err("forbidden", "seller only");
+      const s = sellerById(p.seller_id);
+      return { status: "ok", seller_id: s.seller_id, name: s.name, delegate_negotiation: s.delegated !== false, owner_email: s.owner_email ?? null, next: "" };
     },
     get_inventory(p: Principal): FakeResult {
       if (p.scope !== "seller") return err("forbidden", "seller only");
@@ -334,8 +382,11 @@ export function createMarket({ tamperTotals = false }: { tamperTotals?: boolean 
     toolCalls,
     acks,
     registrations,
+    mints,
     principal,
     createBuyOrder,
+    confirmOrder,
+    mintSellerToken,
     callTool,
     toolNames: Object.keys(tools),
     failAckOnce(id: string) {
@@ -358,7 +409,7 @@ export function createMarket({ tamperTotals = false }: { tamperTotals?: boolean 
       return {
         backend_url: backendUrl,
         buyer,
-        sellers: sellers.map(({ seller_id, name, token }) => ({ seller_id, name, token })),
+        sellers: sellers.filter((s) => !s.dynamic).map(({ seller_id, name, token }) => ({ seller_id, name, token })),
         worker,
       };
     },
@@ -395,6 +446,14 @@ export async function startFakeBackend(market: Market) {
     if (req.method === "POST" && (m = url.pathname.match(/^\/api\/v1\/worker\/events\/([^/]+)\/ack$/))) {
       if (!market.ack(m[1])) return send(503, { error: { code: "unavailable", message: "simulated ack failure" } });
       return send(200, { data: { id: m[1], delivered: true } });
+    }
+    if (req.method === "POST" && (m = url.pathname.match(/^\/api\/v1\/worker\/sellers\/([^/]+)\/token$/))) {
+      const r = market.mintSellerToken(m[1]);
+      return send(r.status, r.body);
+    }
+    if (req.method === "POST" && (m = url.pathname.match(/^\/api\/v1\/worker\/sellers\/([^/]+)\/token$/))) {
+      const r = market.mintSellerToken(m[1]);
+      return send(r.status, r.body);
     }
     if (req.method === "POST" && (m = url.pathname.match(/^\/api\/v1\/worker\/sellers\/([^/]+)\/agent$/))) {
       const body = (await readBody(req)) as { agent_handle?: unknown };

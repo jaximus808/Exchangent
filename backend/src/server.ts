@@ -3,7 +3,7 @@ import type { IncomingMessage } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { CommerceError, fromEnv } from './commerce.ts';
 import type { Commerce } from './commerce.ts';
-import { authFromEnv } from './auth.ts';
+import { authFromEnv, requireUser } from './auth.ts';
 import type { Auth } from './auth.ts';
 import { Activity } from './activity.ts';
 import { Negotiation } from './negotiation.ts';
@@ -67,6 +67,11 @@ export function createApp({commerce,auth,activity=new Activity(commerce),negotia
         actor_id:principal.actorId,kind:principal.kind,scopes:principal.scopes??null,
         request_id:principal.requestId??null,seller_id:principal.sellerId??null,
       }});
+      // Consent page "Create a business": the signed-in person becomes its owner.
+      if(req.method==='POST'&&path==='/api/v1/businesses') {
+        requireUser(principal);
+        return send(201,{data:await negotiation.registerBusinessFor(principal.actorId,await json(req))});
+      }
       if(req.method==='POST'&&path==='/api/v1/buy-requests')
         return send(200,{data:await activity.createRequest(principal,await json(req),req.headers['idempotency-key'])});
       if(req.method==='GET'&&path==='/api/v1/buy-requests')

@@ -12,7 +12,7 @@ import type { InkboxTransportDeps } from "./transport/inkbox.ts";
 import { createMockBrain } from "./brains/mock.ts";
 import { createClaudeBrain } from "./brains/claude.ts";
 import { logger } from "./log.ts";
-import { DealNotifier } from "./notify.ts";
+import { DealNotifier, SaleNotifier } from "./notify.ts";
 
 const log = logger("runner");
 
@@ -30,8 +30,13 @@ export interface Brain<R extends TurnResult = TurnResult> {
   turn(agent: Agent, event: TurnEvent): Promise<R>;
 }
 
-/** The worker endpoints the runner uses (WorkerApi; replaced in tests). */
-export type RunnerApi = Pick<WorkerApi, "events" | "ack" | "registerSellerAgent">;
+/** The worker endpoints the runner uses (WorkerApi; replaced in tests). Without mintSellerToken, only static sellers. */
+export type RunnerApi = Pick<WorkerApi, "events" | "ack" | "registerSellerAgent"> & Partial<Pick<WorkerApi, "mintSellerToken">>;
+
+/** A turn failed because the agent's token was rejected (expired or revoked). */
+export function isUnauthorized(err: unknown): boolean {
+  return /\b401\b|unauthori[sz]ed/i.test((err as Error | null | undefined)?.message || "");
+}
 
 export interface RunnerOverrides {
   api?: RunnerApi;
@@ -52,12 +57,15 @@ export type Runner = Awaited<ReturnType<typeof createRunner>>;
 /** Wire dispatcher -> transport -> per-agent mailbox -> brain. Dependencies are injectable for tests. */
 export async function createRunner(config: Config, overrides: RunnerOverrides = {}) {
   const api = overrides.api || new WorkerApi({ backendUrl: config.backendUrl, token: config.principals.worker.token });
-  const registry = new AgentRegistry(config.principals, () => readPrincipals(config.principalsFile));
+  const minter = api.mintSellerToken ? { mintSellerToken: api.mintSellerToken.bind(api) } : undefined;
+  const registry = new AgentRegistry(config.principals, () => readPrincipals(config.principalsFile), minter);
   const transport = overrides.transport || (await createTransport(config, { backend: api, ...(overrides.transportDeps || {}) }));
 
   const mcpClients = new Map<string, McpToolClient>();
   const mcpFor = async (agent: Agent): Promise<McpToolClient> => {
-    if (!mcpClients.has(agent.id)) mcpClients.set(agent.id, new McpToolClient({ url: config.mcpUrl, token: agent.token, agentId: agent.id }));
+    const existing = mcpClients.get(agent.id);
+    if (existing && existing.token !== agent.token) await existing.close(); // re-minted token: reconnect with it
+    if (!existing || existing.token !== agent.token) mcpClients.set(agent.id, new McpToolClient({ url: config.mcpUrl, token: agent.token, agentId: agent.id }));
     return mcpClients.get(agent.id)!; // set just above if missing
   };
 
@@ -68,11 +76,22 @@ export async function createRunner(config: Config, overrides: RunnerOverrides = 
       : createMockBrain({ mcpFor }));
 
   const notifier = new DealNotifier({ transport, mcpFor });
+  const sales = new SaleNotifier({ transport, mcpFor, platform: () => registry.buyer });
   const turns: TurnRecord[] = [];
   const onTurn = async (agent: Agent, event: TransportMessage) => {
+    if (event.kind === "order.confirmed") return { action: "noop" }; // a notice, never a turn (the dispatcher handles it)
     const t0 = Date.now();
     log.info(`turn start ${event.kind}`, { agent: agent.id, session: event.payload?.session_id, event: event.id });
-    const result = await brain.turn(agent, event);
+    let result: TurnResult;
+    try {
+      result = await brain.turn(agent, event);
+    } catch (err) {
+      // A dynamic seller's token expired or was revoked mid-run: mint a new one and retry the turn once.
+      if (agent.role !== "seller" || !agent.dynamic || !isUnauthorized(err)) throw err;
+      const fresh = await registry.resolveSeller(agent.sellerId, { refresh: true });
+      if (!fresh?.agent) return log.info("seller token not renewed; turn dropped", { agent: agent.id, reason: fresh?.skip }), { action: "noop" };
+      result = await brain.turn(fresh.agent, event);
+    }
     turns.push({ agent: agent.id, kind: event.kind, eventId: event.id, result });
     log.info(`turn done -> ${result?.action}`, { agent: agent.id, ms: Date.now() - t0 });
     if (agent.role === "buyer") await notifier.afterTurn(agent, event, result);
@@ -89,7 +108,14 @@ export async function createRunner(config: Config, overrides: RunnerOverrides = 
   registry.all().forEach(ensureAgent);
   registry.onNew = ensureAgent;
 
-  const dispatcher = new Dispatcher({ api, transport, registry, pollMs: config.pollMs, since: config.skipBacklog ? new Date() : null });
+  const dispatcher = new Dispatcher({
+    api,
+    transport,
+    registry,
+    pollMs: config.pollMs,
+    since: config.skipBacklog ? new Date() : null,
+    onNotice: (seller, event) => sales.onOrder(seller, event),
+  });
 
   return {
     api,

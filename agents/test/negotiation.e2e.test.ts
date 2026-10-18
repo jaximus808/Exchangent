@@ -117,3 +117,56 @@ test("local transport + mock brain negotiate to 'ready to reserve'", async (t) =
   // Local transport never registers Inkbox handles.
   assert.equal(market.registrations.length, 0);
 });
+
+test("self-serve business: dynamic seller agent negotiates and wins, then its owner gets the sale email", async (t) => {
+  const market = createMarket({ selfServe: true });
+  const backend = await startFakeBackend(market);
+  const mcp = await startFakeMcp(market);
+  const logs: LogRecord[] = [];
+  const unsub = onLog((r) => logs.push(r));
+  const requestId = market.createBuyOrder({ title: "Desk + ergonomic chair", requirements: REQUIREMENTS, budget_cents: 38000, target_cents: 28000 });
+  const config: Config = {
+    transport: "local",
+    brain: "mock",
+    backendUrl: backend.url,
+    mcpUrl: mcp.url,
+    pollMs: 10,
+    skipBacklog: false,
+    principals: market.principalsJson(backend.url),
+    principalsFile: "/nonexistent",
+    stateDir: mkdtempSync(path.join(tmpdir(), "agents-e2e-")),
+    inkbox: {},
+    claude: {},
+  };
+  assert.ok(!config.principals.sellers.some((s) => s.seller_id === "s-jaxon"), "the business is not in the principals file");
+  const runner = await createRunner(config);
+  t.after(async () => {
+    unsub();
+    await runner.stop();
+    await mcp.close();
+    await backend.close();
+  });
+  await runner.start();
+  const brain = runner.brain as MockBrain;
+  await waitFor(() => brain.ready.has(requestId), 15000);
+  await runner.idle();
+
+  // The owner's floors (16000 + 9000 + 1000 delivery) let its agent meet the buyer's $280 target.
+  const ready = brain.ready.get(requestId)!;
+  const offer = market.offers.get(ready.offerId!)!;
+  assert.equal(market.sessions.get(offer.session_id)!.seller_id, "s-jaxon");
+  assert.equal(offer.total_cents, 28000);
+  assert.ok(market.toolCalls.some((c) => c.token === "tok-jaxon" && c.name === "make_offer"), "the dynamic agent used its minted token");
+  assert.equal(runner.registry.seller("s-jaxon")!.dynamic, true);
+
+  // The buyer pays: order.confirmed -> one "Sold" email to the owner, no brain turn.
+  const turnsBefore = runner.turns.length;
+  const orderId = market.confirmOrder(ready.offerId!);
+  await waitFor(() => logs.some((l) => l.msg === "sale email sent"), 5000);
+  const sent = logs.find((l) => l.msg === "sale email sent")!;
+  assert.equal(sent.from, "seller:s-jaxon");
+  assert.ok(logs.some((l) => l.msg === "email (local transport: not sent)" && l.subject === "Sold: Desk + ergonomic chair, $280.00"));
+  assert.ok(market.acks.includes(market.outbox.find((e) => e.kind === "order.confirmed" && e.payload.order_id === orderId)!.id));
+  assert.equal(runner.turns.length, turnsBefore, "order.confirmed never runs a brain turn");
+  assert.deepEqual(market.mints, ["s-jaxon"], "minted once, reused for the notice");
+});

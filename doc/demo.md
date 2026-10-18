@@ -31,70 +31,72 @@ you from its Inkbox mailbox when it has a deal. You reserve and pay in Claude, a
 
 ## Cast
 
-| Inkbox identity | Who | Token (`backend/.agent-principals.json`) |
-|---|---|---|
-| `exchangent-buyer` | **Platform buyer agent.** It negotiates every order whose buyer left "let my agent negotiate" on (`delegate_negotiation`, default true), for any account. It can read and counter only. It can never create, reserve or pay. | `buyer_agent` |
-| `exchangent-bay-desk-co` | Bay Desk Co's sales agent. It can reach $345 at its floors. | `seller` |
-| `exchangent-mission-ergonomics` | Mission Ergonomics' sales agent. Its floors add up to $425, so it can't win under $400. | `seller` |
+Two different people, each in their own Claude with the Exchangent connector
+(`https://fast-cloud-tpp4j.run.mcp-use.com/mcp`). Nobody is seeded: any email signs in with a code, and a new
+email creates the account.
 
-SoMa Office Supply only has desks wider than 48in. It never gets a session, so the demo needs 3 identities
-(the Inkbox free plan cap).
+| Who | Signs in as | Their agent | Inkbox identity |
+|---|---|---|---|
+| **Seller** (person A, any email) | **Create a business** on the consent screen, then stocks it in chat | Platform seller agent, minted for the business while "let my agent negotiate" is on | `exchangent-<business-slug>` |
+| **Buyer** (person B, a different email) | **Buyer account** | Platform buyer agent (`buyer_agent` token) | `exchangent-buyer` |
+| Competitor (optional) | nobody: seeded Bay Desk Co | Seeded seller agent | `exchangent-bay-desk-co` |
+
+- Mission Ergonomics and SoMa Office Supply still compete, but they use in-process delivery
+  (`INKBOX_LOCAL_SELLERS`).
+- **The free Inkbox plan has 3 identities: buyer, the new business, and Bay.** If all 3 are already taken, the
+  new business falls back to in-process delivery: it still negotiates, but its messages don't go over Inkbox.
+  Free a slot first by deleting an unused identity (for example `exchangent-mission-ergonomics`) in the Inkbox
+  console.
+- The seller can turn the agent off (`update_business` with `agent_negotiates:false`) and haggle by hand with
+  `list_my_requests`, `get_negotiation` and `make_offer`. The buyer agent still answers. A late, cheaper offer
+  reopens the haggle, and the buyer then gets a "Better deal" email.
 
 ## One-time setup (live)
 
-1. **Apply migrations** to InsForge, from the repo root:
+1. **Apply migrations** from the repo root:
    ```bash
-   npx -y @insforge/cli db migrations up --all    # 20261018000300 order email, 0400 buyer agent, 0500 stale holds
+   npx -y @insforge/cli db migrations up --all    # through 20261018000600 self-serve sign-up
    ```
-2. **Deploy the backend** (merge to `main`, which deploys Vercel) so production has the `buyer_agent` routes.
-3. **Mint agent tokens.** This is additive: it never resets stock and never touches your teammate's seed tokens.
-   ```bash
-   cd backend && npm run agents:tokens     # writes backend/.agent-principals.json (72h tokens)
-   ```
-   `backend/.env.local` needs `INSFORGE_URL`, `INSFORGE_API_KEY` and `COMMERCE_BASE_URL=https://exchangent.vercel.app`.
-4. **Configure the runner.** `agents/.env.local` sets `TRANSPORT=inkbox`, `BACKEND_URL=https://exchangent.vercel.app`,
-   `MCP_URL=https://warm-pulse-8qbp6.run.mcp-use.com/mcp` (the bearer-mode server),
-   `PRINCIPALS_FILE=../backend/.agent-principals.json`, `SKIP_BACKLOG=1` (ignore old test traffic) and your
-   admin-scoped `INKBOX_API_KEY`.
-5. **Smoke test Inkbox:** `cd agents && npm run inkbox:smoke`. It creates the three identities and sends one
-   A2A round trip. Don't run it while the runner is up: two processes on one tunnel take it over from each
-   other.
-6. **Start the runner:** `cd agents && npm start` (`BRAIN=mock` to rehearse, `BRAIN=claude` for the show).
-7. **Connect Claude:** add the `exchangent-mcp-oauth` connector (`https://fast-cloud-tpp4j.run.mcp-use.com/mcp`),
-   sign in, and choose **Buyer account**.
-8. **Payments:**
-   - The Stripe sandbox needs a webhook endpoint `https://exchangent.vercel.app/webhooks/stripe` whose signing
-     secret is `STRIPE_WEBHOOK_SECRET` on Vercel.
-   - The receipt email needs `PRIMITIVE_API_KEY` and `PRIMITIVE_FROM` on Vercel (see `backend/SETUP.md`).
+2. **Deploy:**
+   - Merge to `main` (Vercel deploys the backend and the web consent page).
+   - The Manufact MCP servers redeploy from `manufact`.
+3. **Mint agent tokens** (`cd backend && npm run agents:tokens`): the worker, the buyer agent and the seeded
+   sellers. Self-serve businesses need nothing here: the runner mints their seller tokens itself.
+4. **Runner settings:** `agents/.env.local` sets:
+   - `TRANSPORT=inkbox`, `BACKEND_URL=https://exchangent.vercel.app`
+   - `MCP_URL=https://warm-pulse-8qbp6.run.mcp-use.com/mcp`, `PRINCIPALS_FILE=../backend/.agent-principals.json`
+   - `SKIP_BACKLOG=1`, `INKBOX_LOCAL_SELLERS=Mission Ergonomics,SoMa Office Supply`
+   - an admin-scoped `INKBOX_API_KEY`
+5. **Smoke test:** `cd agents && npm run inkbox:smoke`. Then `npm start` (`BRAIN=mock` to rehearse,
+   `BRAIN=claude` for the show).
+6. **Payments:**
+   - Stripe sandbox webhook `https://exchangent.vercel.app/webhooks/stripe`, with `STRIPE_WEBHOOK_SECRET` on Vercel.
+   - The Primitive receipt needs `PRIMITIVE_API_KEY` and `PRIMITIVE_FROM` (see `backend/SETUP.md`).
 
-## Live script (about 3 minutes)
+## Live script (about 4 minutes)
 
-1. **Ask in Claude:** "Find me a desk no wider than 48 inches and an ergonomic chair delivered in San
-   Francisco by tomorrow. My budget is $400 all-in, and I'd love $300." Claude calls `create_buy_order` and the
-   order panel opens.
-   - Say: "Claude doesn't haggle. It hands off to my buyer agent."
-   - Identical orders are idempotent and return the earlier request. If you rehearsed with the same wording,
-     change a word.
-2. **Show the runner terminal** (and the Inkbox console, if there's room on screen):
-   - `exchangent-buyer` opens sessions with both sellers.
-   - The sellers open at list price ($465 and $530).
-   - The buyer agent counters at $300.
-   - The sellers concede about 5%.
-   - The buyer agent splits the difference ($371.50).
-   - Bay Desk Co meets it.
-   - The run ends with `READY TO RESERVE` and `deal email sent`.
-   - Say: "Every line is an A2A message between two agents' Inkbox identities. None of them carries authority.
-     Each agent re-reads the deal from Exchangent before it moves."
-3. **Show your inbox:** "Deal reached: Bay Desk Co, $371.50", from the buyer agent's own Inkbox mailbox.
-4. **Ask in Claude:** "show my offers". The panel shows Bay Desk Co at $371.50 against Mission at about $478.
-5. **Ask in Claude:** "reserve the Bay Desk Co offer and get me a checkout link". This holds the stock and opens
-   Stripe test Checkout. Pay with `4242 4242 4242 4242`.
-6. **Ask in Claude:** "is it paid?" `get_reservation_status` shows the order confirmed, and Primitive's receipt
-   arrives in your inbox.
-   - Say: "Agents negotiated. A human approved the payment. The rules lived in one place."
+1. **Seller signs up.** Person A connects Exchangent, enters their email and the code, picks **Create a
+   business** ("Alex Woodworks", $15 delivery, 1 day) and approves. In chat:
+   > Add a walnut writing desk, 46 inches wide, list $240, my minimum $155, 2 in stock. And a mesh ergonomic
+   > chair, list $210, minimum $130, 3 in stock.
 
-Measured locally: with `BRAIN=claude` the haggle took about 75 seconds, at roughly $0.15–0.18 per turn on the
-default model. `CLAUDE_MODEL=haiku` is cheaper.
+   Claude calls `upsert_inventory_item` twice. Say: "The floor is private. The buyer's side never sees it."
+2. **Buyer signs up.** Person B connects with a different email, picks **Buyer account**, and asks:
+   > Find me a desk no wider than 48 inches and an ergonomic chair delivered in San Francisco by tomorrow.
+   > Budget $400 all-in, I'd love $300.
+3. **Show the runner terminal.**
+   - The buyer agent opens sessions with Alex Woodworks, Bay Desk Co and Mission.
+   - Each seller agent opens at list price.
+   - The buyer agent counters at $300, and Alex's agent meets it (its floors add up to $300).
+   - The buyer gets `READY TO RESERVE` and a deal email.
+   - Say: "Two people's agents haggled over Inkbox A2A. Each one re-reads the deal from Exchangent before it
+     moves."
+4. **Buyer's inbox:** "Deal reached: Alex Woodworks, $300.00".
+5. **Buyer, in Claude:** "reserve the Alex Woodworks offer and get me a checkout link". Pay with
+   `4242 4242 4242 4242`.
+6. **Buyer:** "is it paid?" The order is confirmed and the receipt arrives.
+7. **Seller's inbox:** "Sold: …, $300.00" from their own agent. **Seller, in Claude:** "show my inventory".
+   The stock went down by one of each.
 
 ## Rehearse locally (no keys, no InsForge, fake Stripe)
 

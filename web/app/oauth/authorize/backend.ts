@@ -1,7 +1,7 @@
 // Server-side calls to the commerce backend for the OAuth consent flow.
 // Imported only by the page (server component) and server actions.
 import {cookies} from 'next/headers';
-import {authorizeBody,type AuthorizeParams,type ConsentTarget} from '@/lib/oauth';
+import {authorizeBody,type AuthorizeParams,type ConsentTarget,type NewBusiness} from '@/lib/oauth';
 
 export type Targets={
  client:{client_id:string;name:string};
@@ -75,5 +75,26 @@ export async function postAuthorize(token:string,params:AuthorizeParams,target:C
  try {
   const body=await response.json() as {data?:{redirect_to?:unknown}};
   return {ok:true,redirect_to:body.data?.redirect_to};
+ } catch {return {ok:false,status:502,code:'bad_response'};}
+}
+
+export type CreateBusinessResult=
+ |{ok:true;seller_id:string;name:string}
+ |{ok:false;status:number;code:string};
+
+/** Creates a business owned by the signed-in person (POST /api/v1/businesses, user session). */
+export async function postBusiness(token:string,business:NewBusiness):Promise<CreateBusinessResult> {
+ let response:Response;
+ try {
+  response=await fetch(`${commerceBase()}/api/v1/businesses`,{method:'POST',
+   headers:{authorization:`Bearer ${token}`,'content-type':'application/json',accept:'application/json'},
+   body:JSON.stringify(business),cache:'no-store',signal:AbortSignal.timeout(15000)});
+ } catch {return {ok:false,status:503,code:'unavailable'};}
+ if(!response.ok) return {ok:false,status:response.status,code:await errorCode(response)};
+ try {
+  const body=await response.json() as {data?:{seller_id?:unknown;name?:unknown}};
+  const id=body.data?.seller_id;
+  if(typeof id!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(id)) return {ok:false,status:502,code:'bad_response'};
+  return {ok:true,seller_id:id,name:typeof body.data?.name==='string'?body.data.name:business.name};
  } catch {return {ok:false,status:502,code:'bad_response'};}
 }

@@ -22,6 +22,10 @@ const EXPECTED_TOOLS = [
   "get_inventory",
   "make_offer",
   "decline_request",
+  "register_business",
+  "get_business",
+  "update_business",
+  "upsert_inventory_item",
   "whoami",
 ].sort();
 
@@ -190,6 +194,45 @@ describe("exchangent mcp server", () => {
     assert.match(neg.sc.next, /make_offer with expected_version 2/);
     const inv = await call(client, "get_inventory", {});
     assert.equal(inv.sc.inventory[0].floor_display, "$380.00");
+  });
+
+  test("register_business posts the business and passes the backend's reconnect hint through", async () => {
+    const client = await connect("buyer-token");
+    backend.requests.length = 0;
+    const { result, sc } = await call(client, "register_business", { name: "Hayes Valley Desks", delivery_cents: 1500 });
+    assert.notEqual(result.isError, true);
+    assert.equal(sc.business.seller_id, IDS.seller);
+    assert.equal(sc.business.delivery_display, "$15.00");
+    assert.match(sc.next, /Reconnect Exchangent.*Hayes Valley Desks/);
+    const req = backend.requests[0];
+    assert.equal(req.method, "POST");
+    assert.equal(req.path, "/api/v1/businesses");
+    assert.deepEqual(req.body, { name: "Hayes Valley Desks", delivery_cents: 1500 });
+    const taken = await call(client, "register_business", { name: "Bay Desk Co" });
+    assert.equal(taken.result.isError, true);
+    assert.equal(taken.sc.error.code, "business_name_taken");
+    assert.match(taken.sc.next, /different business name/);
+  });
+
+  test("seller business tools: get_business, update_business maps agent_negotiates, upsert_inventory_item", async () => {
+    const client = await connect("seller-token");
+    backend.requests.length = 0;
+    const biz = await call(client, "get_business", {});
+    assert.equal(biz.sc.name, "Hayes Valley Desks");
+    assert.match(biz.sc.next, /seller agent negotiates/);
+    const upd = await call(client, "update_business", { agent_negotiates: false, delivery_days: 1 });
+    assert.notEqual(upd.result.isError, true);
+    const patch = backend.requests.find((r) => r.method === "PATCH")!;
+    assert.equal(patch.path, "/api/v1/seller/business");
+    assert.deepEqual(patch.body, { delivery_days: 1, delegate_negotiation: false });
+    const item = { title: "Walnut desk 46in", category: "desk", attributes: { width_in: 46 }, list_cents: 42000, floor_cents: 33000, available: 2 };
+    const up = await call(client, "upsert_inventory_item", item);
+    assert.notEqual(up.result.isError, true);
+    assert.equal(up.sc.floor_display, "$330.00");
+    const post = backend.requests.find((r) => r.path === "/api/v1/seller/inventory")!;
+    assert.deepEqual(post.body, item);
+    const bad = await client.callTool({ name: "upsert_inventory_item", arguments: { ...item, list_cents: 420.5 } });
+    assert.equal(bad.isError, true);
   });
 
   test("without an Authorization header, EXCHANGENT_TOKEN is used as fallback", async () => {

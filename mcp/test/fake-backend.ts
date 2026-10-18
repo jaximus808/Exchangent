@@ -72,6 +72,16 @@ function route(method: string, path: string, body: any): Reply {
   if (method === "GET" && path === "/api/v1/seller/inventory") {
     return ok([{ inventory_id: IDS.inventory, title: "Oak desk", category: "desk", list_cents: 45000, floor_cents: 38000, available: 3, attributes: { width_in: 46 } }]);
   }
+  const business = { seller_id: IDS.seller, name: "Hayes Valley Desks", service_area: "san_francisco", delivery_cents: 1500, delivery_days: 2, delegate_negotiation: true, enabled: true, agent_handle: null, created_at: "2026-10-18T00:00:00Z", owner_email: "owner@example.com" };
+  if (method === "POST" && path === "/api/v1/businesses") {
+    if (String(body?.name).toLowerCase() === "bay desk co") return fail(409, "business_name_taken", "That business name is taken.", "Choose another name.");
+    return ok({ business: { ...business, name: body?.name ?? business.name }, next: `Reconnect Exchangent in your assistant and choose ${body?.name} to manage it.` }, 201);
+  }
+  if (method === "GET" && path === "/api/v1/seller/business") return ok(business);
+  if (method === "PATCH" && path === "/api/v1/seller/business") return ok({ ...business, ...body });
+  if (method === "POST" && path === "/api/v1/seller/inventory") {
+    return ok({ inventory_id: IDS.inventory, sku: body?.sku ?? "walnut-desk-46in", ...body });
+  }
   if (method === "POST" && path === `/api/v1/offers/${IDS.offer}/reservations`) {
     return ok({ id: IDS.reservation, offer_id: IDS.offer, status: "held", total_cents: 52000, currency: "usd" });
   }

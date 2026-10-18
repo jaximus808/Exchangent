@@ -34,9 +34,11 @@ const BUYER: HintContext = { role: "buyer", reread: "get_buy_order" };
 const SELLER: HintContext = { role: "seller", reread: "get_negotiation" };
 const WHOAMI: HintContext = { role: "buyer", reread: "whoami" };
 
-const BUYER_NEXT = "This connection acts for a buyer: use create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link and get_reservation_status.";
+const BUYER_NEXT = "This connection acts for a buyer: use create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link and get_reservation_status. To sell as well, call register_business, then reconnect and choose that business.";
 const sellerNext = (sellerId: unknown) =>
-  `This connection acts for business ${String(sellerId)}: use list_my_requests, get_negotiation, get_inventory, make_offer and decline_request.`;
+  `This connection acts for business ${String(sellerId)}: use get_business, update_business, upsert_inventory_item, get_inventory, list_my_requests, get_negotiation, make_offer and decline_request.`;
+const BUSINESS: HintContext = { role: "seller", reread: "get_business" };
+const REGISTER: HintContext = { role: "buyer", reread: "whoami" };
 
 const seg = (value: string) => encodeURIComponent(value);
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
@@ -395,6 +397,107 @@ export function registerTools(server: MCPServer) {
     },
   );
   // -------------------------------------------------------------------------
+  // Business sign-up and management
+  // -------------------------------------------------------------------------
+
+  const businessFields = {
+    service_area: z.string().regex(/^[a-z_]{2,40}$/).optional().describe("Region you deliver to, lowercase with underscores (default \"san_francisco\"). Buyers in other regions are not matched."),
+    delivery_cents: z.number().int().min(0).max(100000).optional().describe("Delivery fee per order in integer US cents (default 0 = free delivery). Never send dollars."),
+    delivery_days: z.number().int().min(0).max(30).optional().describe("Days to deliver (default 2)."),
+  };
+
+  const register_business=server.tool(
+    {
+      name: "register_business",
+      title: "Register a business",
+      description:
+        "Signed-in person (buyer connection): create a new business that you own, so you can sell on Exchangent. Business names are unique. After creating it, the human must reconnect the Exchangent connector and choose the new business on the consent screen to manage it (add inventory, see buyer requests). By default a seller agent negotiates for the business within its private price floors; turn that off later with update_business.",
+      inputSchema: z.object({
+        name: z.string().trim().min(2).max(80).describe("Public business name shown to buyers, e.g. \"Hayes Valley Desks\"."),
+        ...businessFields,
+      }),
+      outputSchema: resultSchema,
+      annotations: { ...mutation, idempotentHint: false },
+    },
+    async (body, ctx) =>
+      runTool(
+        ctx as CallContext,
+        { method: "POST", path: "/businesses", body, idempotencyKey: deriveIdempotencyKey("register_business", undefined, undefined, body) },
+        REGISTER,
+        {},
+        (d) => String(d.next ?? "Business created. Reconnect Exchangent in your assistant and choose the new business to manage it."),
+      ),
+  );
+
+  const get_business=server.tool(
+    {
+      name: "get_business",
+      title: "Get my business",
+      description:
+        "Seller: show your business profile and settings — name, service_area, delivery fee and days, whether your seller agent negotiates for you (delegate_negotiation), its agent handle and the owner email. Use get_inventory for stock and prices.",
+      inputSchema: z.object({}),
+      outputSchema: resultSchema,
+      annotations: readOnly,
+    },
+    async (_input, ctx) =>
+      runTool(ctx as CallContext, { method: "GET", path: "/seller/business" }, BUSINESS, {}, (d) =>
+        d.delegate_negotiation === false
+          ? "Your seller agent is off: answer buyer requests yourself with list_my_requests, get_negotiation and make_offer, or turn it on with update_business agent_negotiates=true."
+          : "Your seller agent negotiates buyer requests for you within your floors; add or restock items with upsert_inventory_item.",
+      ),
+  );
+
+  const update_business=server.tool(
+    {
+      name: "update_business",
+      title: "Update my business",
+      description:
+        "Seller (owner only): change your business settings. Send only the fields to change. agent_negotiates=false stops the platform seller agent from negotiating for you (and revokes its access); true lets it negotiate within your private floors.",
+      inputSchema: z.object({
+        name: z.string().trim().min(2).max(80).optional().describe("New public business name (unique)."),
+        ...businessFields,
+        agent_negotiates: z.boolean().optional().describe("Let the Exchangent seller agent negotiate for this business."),
+      }),
+      outputSchema: resultSchema,
+      annotations: mutation,
+    },
+    async ({ agent_negotiates, ...rest }, ctx) => {
+      const body = { ...rest, ...(agent_negotiates !== undefined ? { delegate_negotiation: agent_negotiates } : {}) };
+      return runTool(ctx as CallContext, { method: "PATCH", path: "/seller/business", body }, BUSINESS, {}, () =>
+        "Settings saved; call get_business to review them.",
+      );
+    },
+  );
+
+  const upsert_inventory_item=server.tool(
+    {
+      name: "upsert_inventory_item",
+      title: "Add or update an inventory item",
+      description:
+        "Seller (owner only): add an item to your inventory, or update it (same sku). Buyers are matched on category and attributes: a request item {category:\"desk\", max_width_in:48} matches attributes.width_in <= 48, and {category:\"chair\", ergonomic:true} matches attributes.ergonomic === true. list_cents is your public opening price; floor_cents is your PRIVATE minimum (never shown to buyers) and must be <= list_cents. Set available to 0 to stop selling it.",
+      inputSchema: z.object({
+        sku: z.string().min(1).max(60).optional().describe("Your stock code. Leave empty to derive it from the title; reuse it to update the same item."),
+        title: z.string().min(1).max(200).describe("Item name shown to buyers, e.g. \"Walnut desk 46in\"."),
+        category: z.string().regex(/^[a-z_]{2,40}$/).describe("Lowercase category, e.g. \"desk\" or \"chair\"."),
+        attributes: z.record(z.string(), z.unknown()).optional().describe("Matchable facts, e.g. {\"width_in\": 46} for a desk or {\"ergonomic\": true} for a chair."),
+        list_cents: cents("List (opening) price per unit"),
+        floor_cents: cents("Private minimum price per unit; your agent never goes below it"),
+        available: z.number().int().min(0).describe("Units in stock."),
+      }),
+      outputSchema: resultSchema,
+      annotations: mutation,
+    },
+    async (body, ctx) =>
+      runTool(
+        ctx as CallContext,
+        { method: "POST", path: "/seller/inventory", body, idempotencyKey: deriveIdempotencyKey("upsert_inventory_item", body.sku, undefined, body) },
+        BUSINESS,
+        {},
+        () => "Item saved; call get_inventory to see all your stock. New matching buyer requests will open sessions with you.",
+      ),
+  );
+
+  // -------------------------------------------------------------------------
   // Identity (both auth modes)
   // -------------------------------------------------------------------------
 
@@ -443,5 +546,5 @@ export function registerTools(server: MCPServer) {
     },
   );
 
-  return {whoami, create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request};
+  return {whoami, create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request, register_business, get_business, update_business, upsert_inventory_item};
 }
