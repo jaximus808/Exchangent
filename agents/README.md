@@ -37,6 +37,29 @@ with the buyer, seller and worker tokens. The runner reads that file (`PRINCIPAL
 Logs print one line per delivery and per turn, for example `OFFER concedes 5%`, `COUNTER splits the difference`
 and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object per line instead.
 
+### Run headless as a service (macOS)
+
+`npm run service <command>` runs the runner as a launchd user agent (`com.exchangent.agents`), with no terminal
+needed:
+
+| Command | What it does |
+|---|---|
+| `start` | Writes `~/Library/LaunchAgents/com.exchangent.agents.plist` and starts the runner. It refuses if a runner started with `npm start` is already running. |
+| `stop` | Stops it gracefully: in-flight turns finish (up to 60 s). It stays off, also after you log in again. |
+| `restart` | Stop, then start. Use it after pulling new code or editing `.env.local`. |
+| `status` | The launchd state and the runner lock's heartbeat. |
+| `logs` | Follows `.state/logs/runner.log`. |
+| `uninstall` | Stops it and removes the plist. |
+
+**How it runs:**
+- `BRAIN` and `SKIP_BACKLOG` come from the shell that runs `start`. The defaults are `claude` and `0`, for example
+  `BRAIN=mock npm run service start`.
+- A crashed or killed runner is restarted after 15 s. The restart is built into the job, because launchd delays
+  its own restarts on battery power.
+- The job runs under `caffeinate -i`, so the Mac doesn't idle-sleep while agents are on. Closing the lid still
+  sleeps it.
+- `claude -p` uses your normal Claude Code login, the same as in a terminal.
+
 ### Who the buyer agent negotiates for
 
 - **`buyer_agent` token** (`npm run agents:tokens --prefix backend`, file `backend/.agent-principals.json`): the
