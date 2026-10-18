@@ -73,7 +73,7 @@ The full runbook, with more scenarios, is in [doc/demo.md](doc/demo.md).
 | Backend (`backend/`, `migrations/`) | https://exchangent.vercel.app, on InsForge Postgres | Accounts, businesses, inventory, matching, negotiation sessions, reservations, Stripe test Checkout with a verified webhook, orders, cases, refunds, chargeback evidence, and the outbox that wakes the agents |
 | MCP server for people (`mcp/`, OAuth) | `https://fast-cloud-tpp4j.run.mcp-use.com/mcp` on Manufact | Add it to Claude (a claude.ai custom connector, or Claude Code). Sign in, then choose to buy, or to sell as a business you own. It has 34 tools and in-chat panels for orders, offers, checkout, inventory and the agent conversation. |
 | MCP server for agents (`mcp/`, bearer) | `https://warm-pulse-8qbp6.run.mcp-use.com/mcp` on Manufact | The same tools, used by the agent runner with scoped, expiring agent tokens |
-| Agent runner (`agents/`) | A team laptop (see "Not built yet") | One platform buyer agent, and one seller agent per business. Each has its own Inkbox identity and mailbox and talks over Inkbox A2A. Each turn is a headless `claude -p` run with every built-in tool disabled, so it can only call Exchangent's MCP tools, within a per-turn budget. |
+| Agent runner (`agents/`) | A team laptop | One platform buyer agent, and one seller agent per business. Each has its own Inkbox identity and mailbox and talks over Inkbox A2A. Each turn is a headless `claude -p` run with every built-in tool disabled, so it can only call Exchangent's MCP tools, within a per-turn budget. |
 
 **How a deal flows:**
 1. The buyer asks Claude, which calls `create_buy_order`.
@@ -108,20 +108,6 @@ The design is in [doc/resolution-design.md](doc/resolution-design.md).
 - **InsForge:** Postgres, with every marketplace rule enforced in SQL functions, plus email-code sign-in.
 - **Manufact (mcp-use):** hosting for both MCP servers, including OAuth for people's connectors.
 - **Vercel:** the backend API and the web app.
-
-## Not built yet
-
-- **Seller payouts.** Payments land in the platform's Stripe sandbox. There is no Stripe Connect onboarding,
-  transfer or fee yet.
-- **Live payments.** The backend refuses live Stripe keys and events on purpose. It's sandbox only.
-- **A hosted agent runner.** The agents run on a team laptop using its Claude Code login. If the laptop is off,
-  orders are created but nobody negotiates. A turn that crashes mid-flight isn't re-sent yet, so that negotiation
-  stalls until the next event.
-- **Real shipping.** Carrier scans are simulated and labelled as such, checkout doesn't collect an address, and tax
-  is always $0.
-- **Connection management.** There's no page to see or revoke connected assistants yet. Grants expire after 30 days.
-- **Breadth.** One seller per purchase, US dollars only, and regions are simple service-area names. Matching works
-  for any category with numeric or true/false attributes, but the demo data is desks and chairs in San Francisco.
 
 ## Run it
 
