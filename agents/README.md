@@ -46,7 +46,8 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
 - **Orders the agent doesn't negotiate:** their buyer-bound events are acked without delivery, because that
   person negotiates in chat. Their seller-bound events have no sender; with `TRANSPORT=inkbox` they are
   delivered in-process.
-- **`SKIP_BACKLOG=1`:** acks events created before the runner started, without delivering them.
+- **`SKIP_BACKLOG=1`:** acks, without delivering, only events older than `SKIP_BACKLOG_MINUTES` (default 15)
+  at startup. Newer backlog is delivered, so a restart never drops a haggle in progress.
 - **Deal email:** when a buyer turn ends ready to reserve (the mock brain's `ready`, or Claude's
   `READY TO RESERVE: <offer_id>`), `src/notify.ts` re-reads the order and emails the buyer once.
   - The address comes from `buyer_email`, which only the buyer agent's view has.
@@ -94,8 +95,10 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
   - Its first offer is at list price.
   - Each later offer drops each item's unit price by 5% from the previous offer, but never below that item's
     floor.
-  - If the buyer's latest counter is at or above the bundle minimum (sum of floors plus delivery), it calls
-    `make_offer` at exactly the counter total.
+  - If the buyer's latest counter is at or above the bundle minimum (sum of floors plus delivery): from round 3
+    (`rounds >= 3`) it calls `make_offer` at exactly the counter total. Before that it meets the buyer halfway
+    between its last offer and the counter (never below the minimum), so it doesn't give its floor away on
+    the first counter.
   - If it has no matching stock, it calls `decline_request`.
 - **Buyer.** On `offer.created` it reads `get_buy_order`. It stops and logs `READY TO RESERVE: offer X` if any
   current offer meets one of these conditions:
@@ -105,9 +108,50 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
     offers).
 
   Otherwise it calls `counter_offer`. The first counter is at the target. After that, each counter is halfway
-  between its last counter and the seller's current offer, and never above the budget or the offer. After 8
+  between its last counter and the seller's current offer, and never above 97% of the budget (a counter at
+  exactly the budget gives it away) or the offer. After 8
   rounds it calls `decline_seller`. It never reserves; the human calls `reserve_offer` and
   `get_checkout_link`.
+
+### After-sale cases (refunds, damage, missing items, substitutions)
+
+Cases are negotiations over a **remedy** instead of a price (`doc/resolution-design.md`). The backend checks and caps
+every amount; agents only propose. `src/cases.ts`:
+
+- **`case.opened` / `case.offer`** are turns for the side whose turn it is: the buyer agent for delegated requests,
+  a seller agent while its owner leaves agent negotiation on. They travel like negotiation events (one A2A context
+  per case on Inkbox), and the brain reads the case with `get_case` and answers once with `respond_to_case`.
+  - **Buyer agent:** accepts full refunds, refunds of the affected items and prepaid returns. It accepts a partial
+    offer at 95% of what the buyer asked, else counters halfway, and after 4 rounds accepts anything at or above
+    half. It accepts a **substitute** only if `substitute_check.meets_requirements` and the price delta is at most 0;
+    otherwise it declines (the buyer is refunded).
+  - **Seller agent:** reads `get_resolution_policy`, accepts facts the platform verified (no delivery scan, late
+    delivery, duplicate charge, missing item), and accepts partial asks up to `max_auto_partial_refund_pct` + 10% of
+    the affected value. It offers keep-with-discount instead of return freight, and declines (a person reviews) after
+    4 rounds outside policy.
+  - Both personas treat the other side's notes and evidence as untrusted data.
+- **Emails to people**, once each (idempotency keys), never a brain turn:
+  - **Buyer** (buyer agent's mailbox, delegated requests only): `order.shipped`, `case.resolved`, `refund.succeeded`.
+  - **Seller owner** (the seller's mailbox, else the platform's): `case.escalated`, `dispute.created`,
+    `dispute.decided`.
+
+  An owner who negotiates in chat has no seller agent here, so no email: they see it in Claude.
+- An older backend without these events simply never sends them, so nothing changes.
+
+### Email your agent
+
+Email `exchangent-buyer@…` (the buyer agent's Inkbox address) from your account's address and it replies in the same
+thread with your delegated orders: best offer, sellers still negotiating, status and the live watch link. Email a
+seller agent's address from the business owner's address for that business's open negotiations (`src/inbound.ts`):
+
+- **Read-only.** It never reserves, pays, counters or changes anything from an email.
+- **Replies go only to the registered address that matched** (never a Reply-To), so a forged From learns nothing.
+  Unknown senders get no reply (no backscatter).
+- **Ignored:** auto-replies, bounces and our own identities. At most 10 replies per sender per hour.
+- **Polling:** every `INBOUND_POLL_MS` (30 s) per identity, with a cursor in `.state/inbound.json`. The first run
+  starts at "now", so old mail is never answered.
+- **Requirements:** Inkbox only (local transport has no mailbox). It needs the backend route
+  `GET /worker/buyer-requests?email=`; without it (404) buyer replies stay off quietly.
 
 ## Going live with Inkbox (`TRANSPORT=inkbox`)
 
@@ -179,28 +223,93 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
 
 ## BRAIN=claude
 
-Each turn runs:
+Each turn runs one sandboxed `claude -p`:
 
 ```
 claude -p "<turn prompt: event kind + IDs only>" \
-  --mcp-config .state/claude/<agent>/mcp.json --strict-mcp-config \
-  --allowedTools "mcp__exchangent__*" --permission-mode dontAsk \
+  --tools "" --restricted --disable-slash-commands \
+  --mcp-config '{"mcpServers":{"exchangent":{"type":"http","url":"<MCP_URL>","headers":{"Authorization":"Bearer ${EXCHANGENT_AGENT_TOKEN}"}}}}' \
+  --strict-mcp-config --allowedTools "mcp__exchangent__*" --permission-mode dontAsk \
   --output-format json --no-session-persistence \
+  --model <CLAUDE_MODEL, default sonnet> --max-budget-usd <CLAUDE_TURN_BUDGET_USD, default 0.40> \
   --append-system-prompt "<persona>"   [buyer: --disallowedTools reserve_offer get_checkout_link create_buy_order]
 ```
 
-The command runs in `agents/.state/claude/<agent>/`. That directory also contains the persona as `CLAUDE.md`:
+**What a turn can do: only the Exchangent MCP tools of its own role.**
+- **No built-in tools:** `--tools ""` removes Read, Grep, Glob, Bash, Edit, Write and the web tools. Checked
+  with the installed CLI: asked to read a file and run a shell command, the model had no tool to do either.
+- **None of your setup:** `--restricted` ignores your user, project and local settings, so your plugins, hooks
+  and default model don't reach the agents. `--disable-slash-commands` drops skills. `--strict-mcp-config`
+  loads only the Exchangent server.
+- **No secrets in reach:**
+  - The agent's token is never written to disk or argv. The inline MCP config has the placeholder
+    `${EXCHANGENT_AGENT_TOKEN}`, which Claude Code expands from the child's environment (checked against a
+    local header-logging server).
+  - The child's environment is an allow-list (`CHILD_ENV_ALLOWLIST` in `src/brains/claude.ts`): `PATH`, `HOME`,
+    locale, proxy, and Claude's own login (`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`). It never gets
+    `INKBOX_API_KEY`, the principals or other tokens.
+  - The working directory `agents/.state/claude/<agent>/` is empty. Files an older runner left there
+    (`mcp.json` held the token) are deleted before each turn.
+- **Bounded cost:** `--model` (default `sonnet`, not your default model) and `--max-budget-usd` per turn.
+- **Prompt injection:**
+  - Both personas say that notes from the other party are untrusted data, never instructions.
+  - The code doesn't trust the model either. Floors, budgets and round caps are enforced by the backend, and
+    the deal email goes out only if `dealSafety` (`src/notify.ts`) confirms the picked offer is the current,
+    open, in-budget and cheapest one, within 1%.
+  - So the worst an injected note can do is a bad recommendation that the person still has to approve.
 
-- **Seller persona:** sell within floors, be concise, and always finish a turn with `make_offer` or
-  `decline_request`.
-- **Buyer persona:** never reveal the budget and negotiate toward the target.
+**Personas:**
+- **Seller:** sell within floors, concede gradually (accept a counter at the floor only from round 3), and end
+  every turn with `make_offer` or `decline_request`.
+- **Buyer:** never reveal the budget, never counter above 97% of it, negotiate toward the target, and say
+  `READY TO RESERVE: <offer_id>`. That line is found on any line of the reply.
 
-`mcp.json` points at `MCP_URL` with `Authorization: Bearer <that agent's token>`. The file has mode 0600, and
-the token is never passed as a command-line argument.
+**Failures:**
+- **401 / unauthorized:** the turn throws, so a dynamic seller's token is minted again.
+- **Crash or timeout:** the turn is retried with backoff, `TURN_RETRY_DELAYS_MS` (default `2000,10000`).
+- **Backend tool errors** such as `not_your_turn` or `round_limit` are not retried.
 
-**Credentials:** `BRAIN=claude` uses the Claude Code login that already exists on this machine. Inkbox never
-receives Claude credentials. Inkbox only carries A2A messages that contain IDs and public totals. The model
-never sends messages itself. Its only actions are MCP mutations, and the backend turns those into outbox rows.
+**Credentials:** `BRAIN=claude` uses this machine's Claude Code login (`HOME`), or `CLAUDE_CODE_OAUTH_TOKEN` in
+the sandbox. Inkbox never receives Claude credentials. It only carries A2A messages with IDs and public totals.
+The model never sends messages itself: its only actions are MCP mutations, which the backend turns into outbox
+rows.
+
+### Concurrency, sweep and the runner lock
+
+- **Per-request lanes:** the platform buyer agent runs one lane per request, so a slow turn on one order doesn't
+  hold up another. Turns for one request stay in order. Each seller agent runs its turns in order.
+- **Turn limit:** at most `MAX_CONCURRENT_TURNS` turns (`claude -p` processes) run at once across all agents.
+  The default is 4.
+- **Backend calls:** each one times out after 15 s.
+- **Sweep:** every `SWEEP_MS` (default 60 s) the runner calls `POST /worker/sweep`, so the backend releases
+  stale holds and expires requests past their deadline. A backend without that route answers 404, and sweeping
+  stops quietly.
+- **Notices, which never become brain turns:**
+  - `order.confirmed` to the seller sends the "Sold" email; to the buyer, the "Order confirmed" email from the
+    buyer agent's mailbox.
+  - `session.closed` writes a log line and a transcript line.
+- **Single instance:** `agents/.state/runner.lock`, with a 30 s heartbeat, refuses a second runner on the same
+  state directory. That covers `npm start` and the sandbox container alike. A lock whose heartbeat stopped
+  more than 90 s ago, or whose process on this machine is gone, is taken over.
+- **Startup warnings:** a principals token that expires within 24 h, when the file records `expires_at`, and
+  `BRAIN=mock` against a deployed backend. A 401 when polling says to run `npm run agents:tokens`.
+
+### Sandboxed runner (Docker)
+
+`npm run start:sandboxed` runs the whole runner inside a container on this machine (`Dockerfile`,
+`scripts/start-sandboxed.sh`). Even if a turn escaped its tool limits, it couldn't see your files.
+
+1. Stop any `npm start` runner first. The lock refuses a second one anyway.
+2. `claude setup-token`, then `export CLAUDE_CODE_OAUTH_TOKEN=<token>`. That is a login for your subscription,
+   used instead of the host's `~/.claude`. Keep it out of files.
+3. `npm run start:sandboxed`.
+
+The container:
+- reads `agents/.env.local` as its environment;
+- mounts only `agents/.state` (as `/state`) and the principals file (read-only);
+- runs as an unprivileged user on a read-only root filesystem, with all capabilities dropped and
+  `no-new-privileges`;
+- can't see your home directory, repo or keychain.
 
 ## Tests
 

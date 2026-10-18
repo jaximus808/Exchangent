@@ -4,7 +4,7 @@ import {z} from 'zod';
 const cents=z.number().int().nonnegative();
 const delivery=z.looseObject({transport:z.string().optional(),from_handle:z.string().optional(),to_handle:z.string().optional(),message_id:z.string().optional(),context_id:z.string().optional(),delivered_at:z.string().optional()});
 const message=z.looseObject({kind:z.string(),by:z.string(),total_cents:cents.optional(),note:z.string().nullable().optional(),reason:z.string().nullable().optional(),version:z.number().optional(),at:z.string().optional(),delivery:delivery.nullable().optional()});
-const session=z.looseObject({session_id:z.string(),seller_name:z.string().optional(),status:z.string().optional(),turn:z.string().optional(),rounds:z.number().optional(),seller_agent:z.boolean().optional(),seller_handle:z.string().nullable().optional(),messages:z.array(message).optional()});
+const session=z.looseObject({session_id:z.string(),seller_name:z.string().optional(),status:z.string().optional(),turn:z.string().optional(),rounds:z.number().optional(),decline_reason:z.string().nullable().optional(),close_reason:z.string().nullable().optional(),seller_agent:z.boolean().optional(),seller_handle:z.string().nullable().optional(),messages:z.array(message).optional()});
 const conversationSchema=z.looseObject({status:z.enum(['ok','error']),request_id:z.string().optional(),title:z.string().nullable().optional(),request_status:z.string().optional(),delegate_negotiation:z.boolean().optional(),watch_url:z.string().optional(),sessions:z.array(session).optional(),error:z.looseObject({code:z.string()}).optional(),next:z.string().optional()});
 export type Conversation=z.infer<typeof conversationSchema>;
 export type Thread=z.infer<typeof session>;

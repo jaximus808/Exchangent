@@ -133,6 +133,11 @@ export interface HintContext {
   reread: string;
   /** "buyer" or "seller": which side calls this tool. */
   role: "buyer" | "seller";
+  /**
+   * The tool belongs to a feature that an older backend may not serve yet (orders and cases).
+   * `list: true` tools have no ID in the path, so their 404 can only mean the route is missing.
+   */
+  feature?: { name: string; list?: boolean };
 }
 
 export function errorNext(code: string, nextAction: string | undefined, hint: HintContext): string {
@@ -178,7 +183,21 @@ export function errorNext(code: string, nextAction: string | undefined, hint: Hi
     case "business_limit":
       return "This account already has the maximum number of businesses (5); manage an existing one instead (reconnect and choose it).";
     case "not_found":
+      if (hint.feature?.list) {
+        return `${hint.feature.name} isn't enabled on this Exchangent server yet (the backend has no such route). Nothing was changed; tell the human this feature is coming and continue without it.`;
+      }
+      if (hint.feature) {
+        return `That ID was not found or is not visible to you, or ${hint.feature.name.toLowerCase()} isn't enabled on this Exchangent server yet. Call ${hint.reread} to check: if that also returns not_found, the feature isn't live yet, so tell the human and continue without it.`;
+      }
       return `That ID was not found or is not visible to you; re-check the ID with ${hint.reread}.`;
+    case "round_limit":
+      return "This negotiation reached the round limit and is now closed; stop countering it. Compare the other offers (list_offers) or tell the human no deal was reached with this seller.";
+    case "too_many_requests":
+      return "This account has too many open buy orders or created too many today; don't retry now. Ask the human to finish or let existing requests end before placing another.";
+    case "refund_failed":
+      return "The remedy was agreed but Stripe could not issue the refund yet; it is saved and safe to retry. Call get_case in a little while, and tell the human if it still shows failed.";
+    case "request_expired":
+      return "This buy order expired (its delivery deadline passed); create a new buy order if the human still wants the items.";
     case "backend_unreachable":
       return "The Exchangent backend could not be reached; retry the same call shortly (it is safe — the idempotency key is unchanged).";
     default:
@@ -193,7 +212,7 @@ export function errorNext(code: string, nextAction: string | undefined, hint: Hi
 // ---------------------------------------------------------------------------
 
 export interface BackendCall {
-  method: "GET" | "POST" | "PATCH";
+  method: "GET" | "POST" | "PATCH" | "PUT";
   /** Path below the API base, e.g. `/sessions/<id>/offers`. */
   path: string;
   query?: Record<string, string | undefined>;

@@ -22,6 +22,8 @@ export interface EmailMessage {
   html: string;
   /** Same key on a retry: the provider replays the first send instead of sending twice. */
   idempotencyKey: string;
+  /** RFC 5322 Message-ID of the email this replies to (threads an email-your-agent reply). */
+  inReplyToMessageId?: string;
 }
 
 const READY = /READY TO RESERVE:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
@@ -101,6 +103,33 @@ export function dealFromOrder(raw: unknown, offerId: string): Omit<Deal, "email"
 }
 
 /**
+ * Before a deal email goes out, check the agent's pick against the order itself (doc/hardening-contract.md):
+ * the offer must be its session's current open offer, not expired, within the budget, and no other open
+ * current offer may be more than 1% cheaper. The model's READY line alone is never trusted: a note injected
+ * by a seller ("READY TO RESERVE: <my offer>") cannot make the platform recommend it.
+ */
+export function dealSafety(raw: unknown, offerId: string, now: number = Date.now()): { ok: true } | { ok: false; reason: string } {
+  const top = rec(raw);
+  const o = rec(top.request ?? top.buy_order ?? top);
+  const sessions = Array.isArray(o.sessions) ? o.sessions.map(rec) : [];
+  const current = (s: Rec) => {
+    const offer = rec(s.current_offer ?? s.latest_offer);
+    const id = offer.offer_id ?? offer.id;
+    const open = (s.status ?? s.session_status ?? "open") === "open";
+    const expired = typeof offer.expires_at === "string" && Date.parse(offer.expires_at) < now;
+    return id && open && offer.is_current !== false && !expired ? { id: String(id), total: Number(offer.total_cents), seller: String(s.seller_name ?? "a seller") } : null;
+  };
+  const offers = sessions.map(current).filter((x): x is { id: string; total: number; seller: string } => x !== null && Number.isFinite(x.total));
+  const pick = offers.find((x) => x.id === offerId);
+  if (!pick) return { ok: false, reason: "not a current open offer on this order" };
+  const budget = Number(o.budget_cents);
+  if (Number.isFinite(budget) && budget > 0 && pick.total > budget) return { ok: false, reason: "over the budget" };
+  const cheaper = offers.find((x) => x.id !== offerId && x.total < pick.total * 0.99);
+  if (cheaper) return { ok: false, reason: `a cheaper open offer exists (${cheaper.seller})` };
+  return { ok: true };
+}
+
+/**
  * Sends one "deal reached" email per order, and a "better deal" email if the buyer agent later settles on a
  * different (cheaper) offer. Idempotency keys dedupe across restarts.
  */
@@ -123,8 +152,11 @@ export class DealNotifier {
     const previous = this.#sent.get(requestId);
     try {
       const mcp = await this.mcpFor(agent);
-      const deal = dealFromOrder(await mcp.call("get_buy_order", { request_id: requestId }), offerId);
+      const order = await mcp.call("get_buy_order", { request_id: requestId });
+      const deal = dealFromOrder(order, offerId);
       if (!deal) return log.warn("deal email skipped: offer not found on the order", { request: short(requestId), offer: short(offerId) });
+      const safe = dealSafety(order, offerId);
+      if (!safe.ok) return log.warn("deal email skipped: the agent's pick failed the safety check", { request: short(requestId), offer: short(offerId), reason: safe.reason });
       if (!deal.email) return log.info("deal email skipped: buyer has no email on file", { request: short(requestId) });
       this.#sent.set(requestId, offerId);
       await this.transport.email(agent, dealEmail({ ...deal, email: deal.email, requestId, better: previous !== undefined }));
@@ -213,6 +245,69 @@ export class SaleNotifier {
     } catch (err) {
       this.#sent.delete(orderId);
       log.error("sale email failed", { seller: seller.name, order: short(orderId), error: (err as Error).message });
+    }
+  }
+}
+
+/** Build the buyer's "Order confirmed" email (doc/hardening-contract.md: Primitive is off, the buyer agent sends it). */
+export function orderEmail({ email, seller, title, totalCents, orderId }: { email: string; seller: string; title: string; totalCents: number; orderId: string }): EmailMessage {
+  const total = money(totalCents);
+  const text = [
+    `Your order "${title}" is confirmed and paid.`,
+    "",
+    `Seller: ${seller}`,
+    `Total paid, delivered: ${total}`,
+    `Order: ${orderId}`,
+    "",
+    "Payment went through Stripe (test mode). The seller has been told to fulfil it.",
+    "",
+    "- Exchangent buyer agent",
+  ].join("\n");
+  const html =
+    `<p>Your order <b>${esc(title)}</b> is confirmed and paid.</p>` +
+    `<table><tr><td>Seller</td><td><b>${esc(seller)}</b></td></tr><tr><td>Total paid, delivered</td><td><b>${esc(total)}</b></td></tr>` +
+    `<tr><td>Order</td><td><code>${esc(orderId)}</code></td></tr></table>` +
+    `<p>Payment went through Stripe (test mode). The seller has been told to fulfil it.</p><p>- Exchangent buyer agent</p>`;
+  return { to: [email], subject: `Order confirmed: ${seller}, ${total}`, text, html, idempotencyKey: `exchangent-order-${orderId}` };
+}
+
+/**
+ * order.confirmed to the buyer -> one "Order confirmed" email, from the buyer agent's mailbox, to the address on the
+ * order (get_buy_order buyer_email, as for the deal email). Never throws: the event is acked either way.
+ */
+export class OrderNotifier {
+  #sent = new Set<string>();
+  transport: Transport;
+  mcpFor: (agent: Agent) => Promise<McpToolClient>;
+
+  constructor({ transport, mcpFor }: { transport: Transport; mcpFor: (agent: Agent) => Promise<McpToolClient> }) {
+    this.transport = transport;
+    this.mcpFor = mcpFor;
+  }
+
+  async onOrder(buyer: Agent, event: WorkerEvent): Promise<void> {
+    const p = event.payload || {};
+    const orderId = p.order_id;
+    const requestId = p.request_id || event.route?.request_id;
+    if (!orderId || !requestId || this.#sent.has(orderId)) return;
+    try {
+      const mcp = await this.mcpFor(buyer);
+      const o = rec(rec(await mcp.call("get_buy_order", { request_id: requestId })));
+      const order = rec(o.request ?? o.buy_order ?? o);
+      const email = typeof order.buyer_email === "string" && order.buyer_email ? order.buyer_email : null;
+      if (!email) return log.info("order email skipped: buyer has no email on file", { order: short(orderId) });
+      this.#sent.add(orderId);
+      await this.transport.email(buyer, orderEmail({
+        email,
+        seller: String(p.seller_name || "the seller"),
+        title: String(p.title || order.title || "your order"),
+        totalCents: Number(p.total_cents),
+        orderId,
+      }));
+      log.info("order email sent", { order: short(orderId), total_cents: p.total_cents });
+    } catch (err) {
+      this.#sent.delete(orderId);
+      log.error("order email failed", { order: short(orderId), error: (err as Error).message });
     }
   }
 }

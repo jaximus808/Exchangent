@@ -41,3 +41,9 @@ test('comparison uses recorded opening total and seller delivery policy, never i
  assert.deepEqual(fitDetails({...offer,items:[{category:'desk',attributes:{width_in:46}},{category:'chair',attributes:{ergonomic:true}}]},requirements),['Desk fits your 48″ limit','Ergonomic chair included']);
  assert.deepEqual(fitDetails({...offer,items:[{category:'desk'},{category:'chair',attributes:{ergonomic:false}}]},requirements),[]);
 });
+
+test('an expired request says so instead of "agents are negotiating"', async () => {
+ const {progressFor}=await import('../views/shared/presentation.ts');
+ const p=progressFor({status:'ok',request_status:'expired',sessions:[{session_id:'s1',status:'closed'}]} as never);
+ assert.equal(p.title,'Request expired');
+});

@@ -8,6 +8,7 @@ import type { Auth } from './auth.ts';
 import { Activity } from './activity.ts';
 import { Negotiation } from './negotiation.ts';
 import { createHandler } from './http.ts';
+import { Resolution, userResolutionRoute } from './resolution.ts';
 import { checkoutReturn } from './checkout-return.ts';
 import { OAuth, tokenEndpoint } from './oauth.ts';
 
@@ -36,7 +37,8 @@ export interface AppOptions { commerce: Commerce; auth: Auth; activity?: Activit
 const ROLE_TOKEN=/^Bearer (?:[a-f0-9]{64}|exc_[A-Za-z0-9_-]{16,512})$/;
 export function createApp({commerce,auth,activity=new Activity(commerce),negotiation=new Negotiation({db:commerce.db}),
   oauth=new OAuth({db:commerce.db})}: AppOptions) {
-  const negotiationHandler=createHandler({commerce,negotiation});
+  const resolution=new Resolution({commerce,negotiation});
+  const negotiationHandler=createHandler({commerce,negotiation,resolution});
   return createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
     const send=(code: number,data: unknown)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
@@ -73,6 +75,10 @@ export function createApp({commerce,auth,activity=new Activity(commerce),negotia
         return send(201,{data:await negotiation.registerBusinessFor(principal.actorId,await json(req))});
       }
       if(req.method==='GET'&&path==='/api/v1/businesses') return send(200,{data:await activity.businesses(principal)});
+      // Orders, cases and the resolution policy for the web dashboard (src/resolution.ts).
+      const resolved=await userResolutionRoute(resolution,{actor:()=>(requireUser(principal),principal.actorId),method:req.method,path,
+        key:req.headers['idempotency-key'],input:()=>json(req,true),ownBusiness:id=>activity.ownBusiness(principal,id)});
+      if(resolved!==undefined) return send(200,{data:resolved});
       const business=path.match(/^\/api\/v1\/businesses\/([^/]+)(?:\/(sessions|inventory))?$/);
       if(business) {
         if(req.method==='GET'&&business[2]==='sessions') return send(200,{data:await activity.businessSessions(principal,business[1])});

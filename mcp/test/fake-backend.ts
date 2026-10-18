@@ -23,6 +23,8 @@ export const IDS = {
   reservation: "55555555-5555-4555-8555-555555555555",
   seller: "66666666-6666-4666-8666-666666666666",
   inventory: "77777777-7777-4777-8777-777777777777",
+  order: "88888888-8888-4888-8888-888888888888",
+  case: "99999999-9999-4999-8999-999999999999",
 } as const;
 
 type Reply = { status: number; body: unknown };
@@ -33,6 +35,9 @@ const fail = (status: number, code: string, message: string, next_action: string
 });
 
 function route(method: string, path: string, body: any): Reply {
+  if (method === "POST" && path === "/api/v1/buy-requests" && body?.title === "No match") {
+    return ok({ request_id: IDS.request, status: "negotiating", sessions: [] }, 201);
+  }
   if (method === "POST" && path === "/api/v1/buy-requests") {
     return ok({
       request_id: IDS.request,
@@ -75,6 +80,7 @@ function route(method: string, path: string, body: any): Reply {
     if (sid === IDS.staleSession || body?.expected_version === 999) {
       return fail(409, "stale_offer", "Session version changed.", "reread_session");
     }
+    if (body?.expected_version === 777) return fail(409, "round_limit", "Round limit reached.", "Stop negotiating this session.");
     if (action === "offers") return ok({ offer_id: IDS.offer, version: 2, total_cents: 52000, session_version: 3 }, 201);
     if (action === "counters") return ok({ counter_id: "c-1", session_version: 3 }, 201);
     return ok({ session_id: sid, status: "declined" });
@@ -108,6 +114,29 @@ function route(method: string, path: string, body: any): Reply {
   if (method === "GET" && path === `/api/v1/reservations/${IDS.reservation}`) {
     return ok({ reservation_id: IDS.reservation, status: "consumed", total_cents: 52000, currency: "usd", order: { id: "o-1", status: "confirmed" } });
   }
+  // Orders and problem cases (doc/resolution-contract.md). The buyer order *list* route is
+  // deliberately absent, to exercise the "feature not enabled yet" hint.
+  const theCase = {
+    case_id: IDS.case, order_id: IDS.order, type: "damaged", status: "open", turn: "seller", version: 1, rounds: 0, opened_by: "buyer",
+    description: "Scratch across the desktop.", evidence: [{ kind: "photo", ref: "https://example.com/scratch.jpg", by: "buyer" }],
+    moves: [{ by: "buyer", action: "open", remedy: { kind: "keep_with_discount", amount_cents: 9000 }, note: "Happy to keep it for $90 back.", version: 1, created_at: "2026-10-18T05:00:00Z" }],
+  };
+  if (method === "GET" && path === `/api/v1/orders/${IDS.order}`) {
+    return ok({
+      order_id: IDS.order, status: "delivered", title: "Desk + chair", seller_name: "Mission Desk Co", total_cents: 30000, refunded_cents: 0,
+      carrier: "Local courier", tracking: "LC-1", shipped_at: "2026-10-18T04:30:00Z", delivered_at: "2026-10-18T04:45:00Z",
+      delivery_evidence: { source: "simulated", at: "2026-10-18T04:45:00Z" }, items: [{ id: "ri-1", title: "Oak desk", quantity: 1, unit_cents: 15500 }],
+      cases: [theCase], refunds: [],
+    });
+  }
+  if (method === "POST" && path === `/api/v1/orders/${IDS.order}/cases`) return ok({ ...theCase, refunds_to_execute: undefined }, 201);
+  if (method === "GET" && path === `/api/v1/cases/${IDS.case}`) return ok(theCase);
+  if (method === "POST" && path === `/api/v1/cases/${IDS.case}/respond`) {
+    if (body?.expected_version !== 1) return fail(409, "stale_offer", "Case version changed.", "Re-read the case.");
+    return ok({ ...theCase, status: "resolved", version: 2, resolution: { kind: "keep_with_discount", amount_cents: 6000, how: "agreed" }, refunds: [{ amount_cents: 6000, status: "succeeded" }] });
+  }
+  if (method === "POST" && path === `/api/v1/seller/orders/${IDS.order}/ship`) return ok({ order_id: IDS.order, status: "shipped", carrier: body?.carrier, tracking: body?.tracking });
+  if (method === "PUT" && path === "/api/v1/seller/policy") return ok({ seller_id: IDS.seller, max_auto_partial_refund_pct: 15, ...body });
   return fail(404, "not_found", "Not found.", "check_id");
 }
 

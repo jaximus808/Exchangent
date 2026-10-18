@@ -2,8 +2,9 @@ import Stripe from 'stripe';
 import { createAdminClient } from '@insforge/sdk';
 import type { InsForgeClient } from '@insforge/sdk';
 import { orderEmailFromEnv } from './order-email.ts';
+import { chargeEvent } from './disputes.ts';
 import type { OrderEmail } from './order-email.ts';
-import type { Db, DbTable, ErrorCode, OfferRow, OrderSummary, PaymentResult, ReservationRow, SellerRow } from './types.ts';
+import type { CheckoutLine, Db, DbTable, ErrorCode, OfferRow, OrderSummary, PaymentResult, ReservationRow, SellerRow } from './types.ts';
 
 export class CommerceError extends Error {
   code: ErrorCode; status: number;
@@ -32,6 +33,24 @@ const handled = new Set<string>(['checkout.session.completed', 'checkout.session
   'checkout.session.async_payment_failed', 'checkout.session.expired']);
 const isHandled = (event: Stripe.Event): event is CheckoutEvent => handled.has(event.type);
 export interface CheckoutLink { reservation_id: string; session_id: string; url: string | null }
+/**
+ * Stripe Checkout lines for a reservation: each reserved item (title x quantity at its snapshot unit price),
+ * then delivery and tax lines when they are above zero. The lines must add up to the reservation total.
+ */
+export function checkoutLineItems({items,delivery_cents,tax_cents,seller_name,total_cents,currency}: {
+  items: {title: string; quantity: number; unit_cents: number}[]; delivery_cents: number; tax_cents: number;
+  seller_name: string; total_cents: number; currency: string;
+}): CheckoutLine[] {
+  const description=`Sold by ${seller_name.trim()||'an Exchangent seller'} via Exchangent`.slice(0,500);
+  const line=(name: string,quantity: number,unit_amount: number): CheckoutLine=>
+    ({quantity,price_data:{currency,unit_amount,product_data:{name:(name.trim()||'Item').slice(0,250),description}}});
+  const lines=items.map(i=>line(i.title,i.quantity,i.unit_cents));
+  if(delivery_cents>0) lines.push(line('Delivery',1,delivery_cents));
+  if(tax_cents>0) lines.push(line('Tax',1,tax_cents));
+  const sum=lines.reduce((n,l)=>n+l.quantity*l.price_data.unit_amount,0);
+  if(!items.length||sum!==total_cents) throw new CommerceError('reservation_pricing_mismatch');
+  return lines;
+}
 export interface ReceiptItem { title: string; quantity: number; unit_cents: number }
 export interface ReservationStatusView {
   request_id?: string;
@@ -43,6 +62,15 @@ export interface CommerceOptions {
   db: Db; stripe: Stripe; webhookSecret: string; baseUrl: string; integrationId: string;
   /** Order confirmation email; undefined when Primitive is not configured. */
   orderEmail?: Pick<OrderEmail,'deliver'>;
+}
+/**
+ * Receipts keep reporting a paid order as 'confirmed' through fulfilment (shipped, delivered, closed), so
+ * clients that check `order.status === 'confirmed'` keep working; the lifecycle is in `lifecycle_status`.
+ */
+function paidOrder(o: OrderSummary | undefined): OrderSummary | null {
+  if(!o) return null;
+  const lifecycle=o.status as NonNullable<OrderSummary['lifecycle_status']>;
+  return {...o,status:['shipped','delivered','closed'].includes(lifecycle)?'confirmed':o.status,lifecycle_status:lifecycle};
 }
 export class Commerce {
   db: Db; stripe: Stripe; webhookSecret: string; baseUrl: string; integrationId: string;
@@ -97,8 +125,7 @@ export class Commerce {
     const session=await this.stripe.checkout.sessions.create({
       mode:'payment', client_reference_id:r.id, metadata:{reservation_id:r.id},
       integration_identifier:this.integrationId,
-      line_items:[{price_data:{currency:r.currency,unit_amount:r.total_cents,
-        product_data:{name:'Exchangent demo desk and chair bundle',description:'Fictional goods — sandbox payment only; includes agreed demo delivery and tax.'}},quantity:1}],
+      line_items:await this.checkoutLines(r),
       expires_at:Number(r.checkout_expires_at),
       success_url:`${this.baseUrl}/success`,cancel_url:`${this.baseUrl}/cancel`,
     },{idempotencyKey:`exchangent-checkout-${r.id}`});
@@ -106,26 +133,49 @@ export class Commerce {
     await this.rpc('commerce_bind_checkout',{p_reservation:r.id,p_session:session.id,p_url:session.url});
     return {reservation_id:r.id,session_id:session.id,url:session.url};
   }
-  async webhook(raw: string | Buffer, signature: string | string[] | undefined): Promise<PaymentResult | {ignored: true}> {
+  /** The reservation's Checkout lines, from its item snapshots, the offer's delivery and tax, and the seller's name. */
+  async checkoutLines(r: ReservationRow): Promise<CheckoutLine[]> {
+    const {data,error}=await this.db.database.from('commerce_reservation_items').select('title,quantity,unit_cents').eq('reservation_id',r.id);
+    if(error) throw new CommerceError('database_error',503);
+    const offer=await this.row<OfferRow>('commerce_offers',r.offer_id);
+    const seller=await this.row<SellerRow>('commerce_sellers',r.seller_id);
+    // DB boundary: columns selected above. Sorted so a retried create sends identical parameters.
+    const items=((data??[]) as unknown as {title: string; quantity: number; unit_cents: number}[])
+      .sort((a,b)=>a.title.localeCompare(b.title)||a.unit_cents-b.unit_cents||a.quantity-b.quantity);
+    return checkoutLineItems({items,delivery_cents:offer.delivery_cents,tax_cents:offer.tax_cents,seller_name:seller.name,
+      total_cents:r.total_cents,currency:r.currency});
+  }
+  async webhook(raw: string | Buffer, signature: string | string[] | undefined): Promise<PaymentResult | {ignored: true} | Record<string, unknown>> {
     let event: Stripe.Event;
     // A missing header fails verification inside the try, like any bad signature.
     try {event=this.stripe.webhooks.constructEvent(raw,signature as string | string[],this.webhookSecret);}
     catch {throw new CommerceError('invalid_signature',400);}
     if(event.livemode!==false) throw new CommerceError('live_event_rejected',400);
-    if(!isHandled(event)) return {ignored:true};
+    // Disputes and refunds after payment (src/disputes.ts); anything else is acknowledged and ignored.
+    if(!isHandled(event)) return (await chargeEvent(this,event))??{ignored:true};
     // Refetch authoritative state: a delayed/old event cannot roll a paid order back.
     const session=await this.stripe.checkout.sessions.retrieve(event.data.object.id);
     const id=session.metadata?.reservation_id;
     if(!id) throw new CommerceError('reservation_binding_missing',400);
     const r=await this.row<ReservationRow>('commerce_reservations',id);
     validateSession(session,r);
-    const result=await this.rpc<PaymentResult>('commerce_apply_payment',{
+    const args={
       p_event:event.id,p_type:event.type,p_reservation:r.id,p_session:session.id,
       p_total:session.amount_total,p_currency:session.currency,
       p_paid:session.payment_status==='paid',
       p_release:session.status==='expired' || (event.type==='checkout.session.async_payment_failed' && session.payment_status==='unpaid'),
       p_pending:session.status==='complete' && session.payment_status==='unpaid',
-    });
+    };
+    // The PaymentIntent is what refunds and disputes reference (migration 0800 stores it on the order).
+    const pi=typeof session.payment_intent==='string'?session.payment_intent:session.payment_intent?.id??null;
+    let result: PaymentResult;
+    try {result=await this.rpc<PaymentResult>('commerce_apply_payment',pi?{...args,p_payment_intent:pi}:args);}
+    catch(error) {
+      // Before migration 0800 there is no p_payment_intent argument: PostgREST reports that as SQL text, never
+      // as one of our snake_case codes. The failed call changed nothing, so retry without it.
+      if(!pi||!(error instanceof CommerceError)||/^[a-z_]+$/.test(error.code)) throw error;
+      result=await this.rpc<PaymentResult>('commerce_apply_payment',args);
+    }
     if(session.payment_status==='paid') await this.confirmationEmail(r.id,result);
     return result;
   }
@@ -167,7 +217,7 @@ export class Commerce {
     return {request_id:r.request_id,reservation_id:r.id,status:r.status,total_cents:r.total_cents,currency:r.currency,
       seller:{id:seller.id,name:seller.name},items:lines,subtotal_cents:subtotal,
       delivery_cents:offer.delivery_cents,tax_cents:offer.tax_cents,expires_at:r.expires_at,
-      order:(data?.[0] as OrderSummary | undefined)??null};
+      order:paidOrder(data?.[0] as OrderSummary | undefined)};
   }
 }
 // The SDK's PostgREST builder parses select() column strings at the type level, so a

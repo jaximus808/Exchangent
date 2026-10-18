@@ -1,10 +1,11 @@
 'use client';
 import {useCallback,useEffect,useState} from 'react';
-import {Bot,Loader2,LockKeyhole,MessageSquareText,Plus,Store,Truck,UserRound} from 'lucide-react';
+import {Bot,Loader2,LockKeyhole,MessageSquareText,Plus,Scale,Store,Trash2,Truck,UserRound} from 'lucide-react';
 import {currentOffer,type ConvSession} from '@/lib/conversation';
 import {api,ApiError,dollarsToCents,errorText,money,type Business,type InventoryItem} from '@/lib/workspace';
 import {Thread} from './thread';
 import {Empty,Status,Toggle,WorkspaceDialog,initials} from './ui';
+import {PolicyEditor,SellerOrders} from './orders';
 
 type SellerSession=ConvSession&{request_title?:string|null;request?:{title?:string|null}|null};
 const sessionTitle=(s:SellerSession)=>s.title||s.request_title||s.request?.title||'Buy request';
@@ -33,9 +34,22 @@ export function CreateBusinessForm({onCreated}:{onCreated:(b:Business)=>void}) {
  </form>;
 }
 
+type AttrRow={key:string;value:string};
+const PRESETS:Record<string,AttrRow[]>={desk:[{key:'width_in',value:'46'}],chair:[{key:'ergonomic',value:'true'}],other:[]};
+/** "46" → 46, "true"/"false" → booleans, anything else stays text. */
+const parseAttr=(v:string):unknown=>{const t=v.trim();if(t==='true')return true;if(t==='false')return false;if(t!==''&&Number.isFinite(Number(t)))return Number(t);return t;};
+
+/** Free-form matchable facts: buyers' requests filter on them (max_width_in 48 matches width_in ≤ 48; ergonomic true matches ergonomic: true). */
+function AttributeEditor({rows,onChange}:{rows:AttrRow[];onChange:(rows:AttrRow[])=>void}) {
+ return <fieldset className="item-picks"><legend>Attributes buyers can match on</legend><div className="attr-rows">
+  {rows.map((r,i)=><div className="attr-row" key={i}><input aria-label="Attribute name" value={r.key} onChange={e=>onChange(rows.map((x,j)=>j===i?{...x,key:e.target.value}:x))} placeholder="width_in"/><input aria-label="Attribute value" value={r.value} onChange={e=>onChange(rows.map((x,j)=>j===i?{...x,value:e.target.value}:x))} placeholder="46, true or text"/><button type="button" className="icon-button" aria-label="Remove attribute" onClick={()=>onChange(rows.filter((_,j)=>j!==i))}><Trash2 size={14}/></button></div>)}
+  <button type="button" className="text-button" onClick={()=>onChange([...rows,{key:'',value:''}])}><Plus size={13}/>Add attribute</button>
+ </div><span className="field-help">Numbers match limits (a request for “max_width_in 48” matches width_in up to 48). true/false match exactly.</span></fieldset>;
+}
+
 function AddItemForm({business,onAdded}:{business:Business;onAdded:(item:InventoryItem)=>void}) {
  const[title,setTitle]=useState('');const[category,setCategory]=useState('desk');const[other,setOther]=useState('');
- const[width,setWidth]=useState('46');const[ergonomic,setErgonomic]=useState(true);
+ const[attrs,setAttrs]=useState<AttrRow[]>(PRESETS.desk);
  const[list,setList]=useState('');const[floor,setFloor]=useState('');const[available,setAvailable]=useState('1');
  const[error,setError]=useState('');const[busy,setBusy]=useState(false);
  return <form className="stack-form" onSubmit={async e=>{e.preventDefault();setError('');
@@ -47,18 +61,18 @@ function AddItemForm({business,onAdded}:{business:Business;onAdded:(item:Invento
   if(floor_cents>list_cents) return setError('Your minimum can’t be above the list price.');
   if(!Number.isInteger(stock)||stock<0) return setError('Stock is a whole number.');
   const attributes:Record<string,unknown>={};
-  if(cat==='desk'&&width.trim()){const w=Number(width);if(!Number.isFinite(w)||w<=0)return setError('Enter the desk width in inches.');attributes.width_in=w;}
-  if(cat==='chair') attributes.ergonomic=ergonomic;
+  for(const r of attrs){const key=r.key.trim();if(!key&&!r.value.trim())continue;
+   if(!/^[a-z][a-z0-9_]{0,39}$/.test(key))return setError('Attribute names are lowercase letters, digits and underscores, like “width_in”.');
+   if(!r.value.trim())return setError(`Give “${key}” a value.`);attributes[key]=parseAttr(r.value);}
   setBusy(true);
   try {onAdded(await api<InventoryItem>(`businesses/${business.seller_id}/inventory`,{method:'POST',body:JSON.stringify({title:title.trim(),category:cat,attributes,list_cents,floor_cents,available:stock})}));}
   catch(err){setError(errorText(err,'The item couldn’t be saved.'));} finally{setBusy(false);}
  }}>
   <label>Item<input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Walnut writing desk" maxLength={200} required autoFocus/></label>
-  <div className="form-grid"><label>Category<select value={category} onChange={e=>setCategory(e.target.value)}><option value="desk">Desk</option><option value="chair">Chair</option><option value="other">Something else</option></select></label>
-   {category==='desk'&&<label>Width (inches)<input type="number" min="1" step=".5" value={width} onChange={e=>setWidth(e.target.value)}/></label>}
-   {category==='chair'&&<label className="check-label"><input type="checkbox" checked={ergonomic} onChange={e=>setErgonomic(e.target.checked)}/>Ergonomic</label>}
+  <div className="form-grid"><label>Category<select value={category} onChange={e=>{setCategory(e.target.value);setAttrs(PRESETS[e.target.value]??[]);}}><option value="desk">Desk</option><option value="chair">Chair</option><option value="other">Something else</option></select></label>
    {category==='other'&&<label>Category name<input value={other} onChange={e=>setOther(e.target.value)} placeholder="bookshelf" maxLength={40}/></label>}
   </div>
+  <AttributeEditor rows={attrs} onChange={setAttrs}/>
   <div className="form-grid three"><label>List price<div className="input-with-prefix"><span>$</span><input type="number" min="0.01" step=".01" value={list} onChange={e=>setList(e.target.value)} required/></div></label>
    <label>Your minimum<div className="input-with-prefix"><span>$</span><input type="number" min="0.01" step=".01" value={floor} onChange={e=>setFloor(e.target.value)} required/></div><span className="field-help"><LockKeyhole size={10}/> Private. Buyers never see it.</span></label>
    <label>In stock<input type="number" min="0" step="1" value={available} onChange={e=>setAvailable(e.target.value)} required/></label></div>
@@ -70,7 +84,7 @@ function AddItemForm({business,onAdded}:{business:Business;onAdded:(item:Invento
 function BusinessPanel({business,onUpdated}:{business:Business;onUpdated:(b:Business)=>void}) {
  const[inventory,setInventory]=useState<InventoryItem[]|null|undefined>(business.inventory);
  const[sessions,setSessions]=useState<SellerSession[]|null>(null);
- const[toggling,setToggling]=useState(false);const[error,setError]=useState('');const[adding,setAdding]=useState(false);
+ const[toggling,setToggling]=useState(false);const[error,setError]=useState('');const[adding,setAdding]=useState(false);const[policyOpen,setPolicyOpen]=useState(false);
  const[now,setNow]=useState(()=>Date.now());
  useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),5000);return()=>clearInterval(t);},[]);
  const load=useCallback(async()=>{
@@ -90,6 +104,7 @@ function BusinessPanel({business,onUpdated}:{business:Business;onUpdated:(b:Busi
   <header className="business-head"><span className="seller-badge" aria-hidden="true">{initials(business.name)}</span>
    <div className="business-title"><h2>{business.name}</h2><span>{business.agent_handle?<span className="mono">@{business.agent_handle}</span>:'Inkbox identity created on first negotiation'} · <Truck size={12}/>{business.delivery_cents?money(business.delivery_cents):'Free'} · {business.delivery_days} day{business.delivery_days===1?'':'s'}</span></div>
    <div className="agent-switch"><span>{business.delegate_negotiation?<><Bot size={14}/>Seller agent negotiates</>:<><UserRound size={14}/>You negotiate in chat</>}</span><Toggle checked={business.delegate_negotiation} onChange={v=>void toggle(v)} label="Let my seller agent negotiate" busy={toggling}/></div>
+   <button className="button secondary compact" onClick={()=>setPolicyOpen(true)}><Scale size={14}/>Resolution policy</button>
   </header>
   {error&&<p className="form-error" role="alert">{error}</p>}
   <div className="business-grid">
@@ -103,6 +118,10 @@ function BusinessPanel({business,onUpdated}:{business:Business;onUpdated:(b:Busi
      <div className="conversation-list">{sessions.slice(0,8).map((s,i)=><details className="conversation-card" key={s.session_id} open={i===0}><summary><strong>{sessionTitle(s)}</strong><span>{currentOffer(s)?.total_cents!==undefined?money(currentOffer(s)!.total_cents!):s.status==='declined'?'Declined':'Your offer pending'}</span><span className="muted">{s.status==='open'?(s.turn==='seller'?'Your move':'Buyer’s move'):s.status}</span></summary><Thread session={s} conversation={null} perspective="seller" now={now}/></details>)}</div>}
    </section>
   </div>
+  <SellerOrders business={business}/>
+  <WorkspaceDialog open={policyOpen} onClose={()=>setPolicyOpen(false)} title="Resolution policy" description="How problems after a sale are settled for this business, automatically and by your agent.">
+   {policyOpen&&<PolicyEditor business={business} onSaved={()=>setPolicyOpen(false)}/>}
+  </WorkspaceDialog>
   <WorkspaceDialog open={adding} onClose={()=>setAdding(false)} title="Add an item" description="List price is your opening ask. Your minimum stays private: buyers only ever see offers.">
    <AddItemForm business={business} onAdded={item=>{setInventory(list=>[...(list??[]).filter(i=>i.inventory_id!==item.inventory_id),item]);setAdding(false);}}/>
   </WorkspaceDialog>

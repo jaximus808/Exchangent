@@ -57,12 +57,12 @@ export function ConversationPanel() {
   :!data?<div className="state"><strong>This conversation couldn’t be displayed.</strong><p>Ask your assistant to refresh it.</p></div>
   :data.status==='error'?<div className="state"><strong>{data.error?.code==='forbidden'?'Choose your buyer account':'Reconnect to Exchangent'}</strong><p>Only the buyer who placed this order can watch its negotiation.</p></div>
   :<>
-   <div className="intro"><span className="eyebrow">{live?'Agents negotiating · live':'How the agents negotiated'}</span><h1>{data.title??'Your buying request'}</h1>
+   <div className="intro"><span className="eyebrow">{live?'Agents negotiating · live':data.request_status==='expired'?'Request expired · deadline passed':'How the agents negotiated'}</span><h1>{data.title??'Your buying request'}</h1>
     <p>{turns} {turns===1?'turn':'turns'} across {data.sessions?.length??0} {(data.sessions?.length??0)===1?'business':'businesses'}{best?` · best current offer ${money(best.total)} from ${best.seller}`:''}. Every turn is checked by Exchangent before it counts.</p></div>
    {data.watch_url&&<button className="button secondary" disabled={!host.hostCapabilities?.openLinks} onClick={()=>void open({url:data.watch_url!})}>Open live view ↗</button>}
    {error&&<p className="error" role="alert">{error} <button className="text-button" disabled={busy} onClick={()=>void update()}>Try again</button></p>}
    <div className="threads">{(data.sessions??[]).length?(data.sessions??[]).map(s=><article className="thread" key={s.session_id}>
-    <div className="thread-head"><h2>{s.seller_name??'Seller'}</h2><span>{s.seller_agent===false?'Owner in chat':'Seller agent'} · {s.status==='open'?`round ${s.rounds??0} · ${s.turn==='seller'?'seller’s turn':'your side’s turn'}`:s.status??''}</span></div>
+    <div className="thread-head"><h2>{s.seller_name??'Seller'}</h2><span>{s.seller_agent===false?'Owner in chat':'Seller agent'} · {s.status==='open'?`round ${s.rounds??0} · ${s.turn==='seller'?'seller’s turn':'your side’s turn'}`:[s.status,s.close_reason??s.decline_reason].filter(Boolean).join(' · ')}</span></div>
     <ol className="chat">{(s.messages??[]).map((m,i)=><Bubble key={i} m={m} s={s} delegated={data.delegate_negotiation}/>)}</ol>
    </article>):<div className="state"><strong>No businesses matched yet</strong><p>Threads appear here as soon as a seller is matched.</p></div>}</div>
    <p className="note">Agents notify each other over Inkbox A2A; prices and rules live in Exchangent, so a message alone can’t change a deal. Seller minimums and your budget are never shown.</p>

@@ -45,7 +45,10 @@ export interface InkboxConfig {
 /** BRAIN=claude settings. Every field is optional: the Claude brain has a default for each. */
 export interface ClaudeConfig {
   bin?: string;
+  /** CLAUDE_MODEL (default sonnet). */
   model?: string;
+  /** CLAUDE_TURN_BUDGET_USD: --max-budget-usd per turn (default 0.40). */
+  budgetUsd?: number;
   timeoutMs?: number;
 }
 
@@ -55,8 +58,20 @@ export interface Config {
   backendUrl: string;
   mcpUrl: string;
   pollMs: number;
-  /** SKIP_BACKLOG=1: ack events created before the runner started without delivering them. */
+  /** SKIP_BACKLOG=1: ack old backlog without delivering it (see skipBacklogMinutes). */
   skipBacklog: boolean;
+  /** SKIP_BACKLOG_MINUTES (default 15): only events older than this at startup count as backlog; newer ones are delivered. */
+  skipBacklogMinutes?: number;
+  /** MAX_CONCURRENT_TURNS (default 4): brain turns (claude -p processes) running at once across all agents. */
+  maxConcurrentTurns?: number;
+  /** TURN_RETRY_DELAYS_MS (default "2000,10000"): backoff before each retry of a failed turn. */
+  retryDelaysMs?: number[];
+  /** SWEEP_MS (default 60000): how often the runner asks the backend to sweep stale holds and deadlines; 0 = off. */
+  sweepMs?: number;
+  /** EXCHANGENT_WEB_URL: the web app, for watch links in email-your-agent replies. */
+  webUrl?: string;
+  /** INBOUND_POLL_MS (default 30000): how often agent inboxes are read for email-your-agent; 0 = off. */
+  inboundPollMs?: number;
   principalsFile: string;
   principals: Principals;
   stateDir: string;
@@ -115,6 +130,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mcpUrl: env.MCP_URL || "http://127.0.0.1:3100/mcp",
     pollMs: Number(env.POLL_MS || 1000),
     skipBacklog: ["1", "true", "yes"].includes((env.SKIP_BACKLOG || "").toLowerCase()),
+    skipBacklogMinutes: nonNegative(env.SKIP_BACKLOG_MINUTES, 15),
+    maxConcurrentTurns: Math.max(1, nonNegative(env.MAX_CONCURRENT_TURNS, 4)),
+    retryDelaysMs: (env.TURN_RETRY_DELAYS_MS ?? "2000,10000").split(",").map((x) => x.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n) && n >= 0),
+    sweepMs: nonNegative(env.SWEEP_MS, 60000),
+    webUrl: (env.EXCHANGENT_WEB_URL || "https://web-five-jet-34.vercel.app").replace(/\/+$/, ""),
+    inboundPollMs: nonNegative(env.INBOUND_POLL_MS, 30000),
     principalsFile,
     principals,
     stateDir: path.resolve(AGENTS_DIR, env.STATE_DIR || ".state"),
@@ -128,10 +149,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     },
     claude: {
       bin: env.CLAUDE_BIN || "claude",
-      model: env.CLAUDE_MODEL || undefined,
+      model: env.CLAUDE_MODEL || "sonnet",
+      budgetUsd: nonNegative(env.CLAUDE_TURN_BUDGET_USD, 0.4),
       timeoutMs: Number(env.CLAUDE_TIMEOUT_MS || 180000),
     },
   };
+}
+
+function nonNegative(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 function isTransportName(s: string): s is TransportName {

@@ -72,6 +72,25 @@ data has its own `status` field, it's renamed so it doesn't clash with the envel
 | `update_business` | seller (owner only) | `PATCH /seller/business`. `agent_negotiates` maps to `delegate_negotiation` |
 | `upsert_inventory_item` | seller (owner only) | `POST /seller/inventory`. Upserts by `sku` |
 | `whoami` | either | bearer mode: `GET /me`. oauth mode: the signed-in grant, with no backend call |
+| `list_my_orders` | buyer | `GET /orders` |
+| `get_order` | buyer | `GET /orders/:id`: shipping timeline, problem cases and refunds (view `order-detail`) |
+| `confirm_received` | buyer | `POST /orders/:id/received` |
+| `open_case` | buyer | `POST /orders/:id/cases`. Verifiable facts settle it automatically, otherwise the seller responds within their policy |
+| `add_evidence` | either | `POST /cases/:id/evidence` |
+| `respond_to_case` | either | `POST /cases/:id/respond` (`accept`, `counter` with a remedy, or `decline`; pass the case `version`) |
+| `get_case` | either | `GET /cases/:id` (view `case-detail`) |
+| `list_orders` | seller | `GET /seller/orders` |
+| `mark_shipped` | seller | `POST /seller/orders/:id/ship` |
+| `simulate_delivery` | seller, **test mode only** | `POST /seller/orders/:id/simulate-delivery`: a labelled simulated carrier scan, since real tracking isn't connected |
+| `report_fulfilment_issue` | seller | `POST /seller/orders/:id/issue` (`out_of_stock` with an optional substitute, or `address_problem`) |
+| `list_cases` | seller | `GET /seller/cases` |
+| `confirm_return` | seller | `POST /cases/:id/return-received` (issues the refund for `return_for_refund`) |
+| `get_resolution_policy` | seller | `GET /seller/policy` |
+| `set_resolution_policy` | seller (owner only) | `PUT /seller/policy` |
+
+The order and case tools need a backend with the resolution routes (`migrations/20261018000900_resolution.sql`). Against
+an older backend they return `not_found` with a `next` that says the feature isn't enabled yet, rather than blaming the
+ID.
 
 `whoami` returns `auth_mode` (`bearer` or `oauth`). In oauth mode it also returns `actor_id`,
 `kind`, `scope` (`buyer` or `seller`), `seller_id`, `client_id`, `acting_as` and

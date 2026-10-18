@@ -25,12 +25,13 @@ import type {
   AgentIdentity,
   Inkbox,
   InkboxOptions,
+  MessageDirection,
   verifyWebhook,
 } from "@inkbox/sdk";
 import type { connect, TunnelListener } from "@inkbox/sdk/tunnels/connect";
 import { JsonState } from "../state.ts";
 import { localReceipt, publicPayload, toMessage } from "./index.ts";
-import type { DeliveryReceipt, MessageHandler, PublicPayload, Transport, TransportMessage } from "./index.ts";
+import type { DeliveryReceipt, InboundEmail, MessageHandler, PublicPayload, Transport, TransportMessage } from "./index.ts";
 import type { Agent } from "../agents.ts";
 import type { EventKind, WorkerEvent } from "../backend.ts";
 import { logger, money, short } from "../log.ts";
@@ -179,7 +180,8 @@ export function eventParts(fromAgent: Agent | null | undefined, event: WorkerEve
   const { note, ...ids } = msg.payload;
   const data: A2AEventData = { kind: msg.kind, event_id: msg.id, created_at: msg.created_at, ...ids };
   const total = ids.total_cents !== undefined ? ` total ${money(ids.total_cents)}` : "";
-  const text = `${msg.kind} session ${short(ids.session_id)}${total}${note ? ` - "${String(note).slice(0, 140)}"` : ""}. Re-read the session via MCP before acting.`;
+  const what = ids.case_id ? `case ${short(ids.case_id)}` : `session ${short(ids.session_id)}`;
+  const text = `${msg.kind} ${what}${total}${note ? ` - "${String(note).slice(0, 140)}"` : ""}. Re-read the ${ids.case_id ? "case" : "session"} via MCP before acting.`;
   return [{ data }, { text }];
 }
 
@@ -580,7 +582,8 @@ export class InkboxTransport implements Transport {
     }
     const a2a = await this.#a2a(fromAgent.id);
     const target = await this.#card(fromAgent.id, toRec);
-    const sessionId = event.payload?.session_id;
+    // One A2A context per negotiation session, and one per after-sale case.
+    const sessionId = event.payload?.session_id || (event.payload?.case_id ? `case:${event.payload.case_id}` : undefined);
     const contextId = sessionId ? this.state.data.contexts[sessionId] : undefined;
     const result = await a2a.send(target, {
       messageId: event.id,
@@ -615,8 +618,49 @@ export class InkboxTransport implements Transport {
       bodyText: message.text,
       bodyHtml: message.html,
       idempotencyKey: message.idempotencyKey,
+      ...(message.inReplyToMessageId ? { inReplyToMessageId: message.inReplyToMessageId } : {}),
     });
     log.info("email sent", { from: this.identityFor(from.id)?.handle, subject: message.subject });
+  }
+
+  /** Inbound mail to this agent's mailbox since `since` (email-your-agent), oldest first; at most `limit`. */
+  async inboundEmails(agent: Agent, since: Date | null, limit = 25): Promise<InboundEmail[]> {
+    if (!this.state.data.identities[agent.id]?.agent_api_key) return []; // no identity (local, or not provisioned yet)
+    const me = await this.#agentIdentity(agent.id);
+    const out: InboundEmail[] = [];
+    // MessageDirection.INBOUND is the wire string "inbound" (the enum is a runtime export of the lazily loaded SDK).
+    const iter = me.iterEmails({ direction: "inbound" as MessageDirection, pageSize: limit, ...(since ? { startDatetime: since.toISOString() } : {}) });
+    for await (const m of iter) {
+      out.push({
+        id: m.id,
+        messageId: m.messageId || null,
+        threadId: m.threadId,
+        from: m.fromAddress,
+        subject: m.subject,
+        snippet: m.snippet,
+        createdAt: new Date(m.createdAt).toISOString(),
+      });
+      if (out.length >= limit) break;
+    }
+    return out.reverse();
+  }
+
+  async markEmailsRead(agent: Agent, ids: string[]): Promise<void> {
+    if (!ids.length || !this.state.data.identities[agent.id]?.agent_api_key) return;
+    await (await this.#agentIdentity(agent.id)).markEmailsRead(ids);
+  }
+
+  /** Addresses of every identity this runner holds a key for. */
+  async ownEmailAddresses(): Promise<string[]> {
+    const out: string[] = [];
+    for (const [agentId, rec] of Object.entries(this.state.data.identities)) {
+      if (!rec.agent_api_key) continue;
+      try {
+        const address = (await this.#agentIdentity(agentId)).emailAddress;
+        if (address) out.push(address);
+      } catch { /* skip */ }
+    }
+    return out;
   }
 
   async close(): Promise<void> {

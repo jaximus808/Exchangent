@@ -28,6 +28,21 @@ const EXPECTED_TOOLS = [
   "update_business",
   "upsert_inventory_item",
   "whoami",
+  "list_my_orders",
+  "get_order",
+  "confirm_received",
+  "open_case",
+  "add_evidence",
+  "respond_to_case",
+  "get_case",
+  "list_orders",
+  "mark_shipped",
+  "simulate_delivery",
+  "report_fulfilment_issue",
+  "list_cases",
+  "confirm_return",
+  "get_resolution_policy",
+  "set_resolution_policy",
 ].sort();
 
 let backend: FakeBackend;
@@ -80,13 +95,13 @@ describe("exchangent mcp server", () => {
     assert.deepEqual([...(counter.inputSchema.required ?? [])].sort(), ["expected_version", "session_id", "total_cents"]);
   });
 
-  test("nine tools expose distinct readable MCP App resources",async()=>{
+  test("eleven tools expose distinct readable MCP App resources",async()=>{
     const client=await connect("buyer-token");
     const {tools}=await client.listTools();
     const bound=tools.filter(t=>!!(t._meta?.ui as {resourceUri?:string}|undefined)?.resourceUri);
-    assert.equal(bound.length,9);
+    assert.equal(bound.length,11);
     const uris=bound.map(t=>(t._meta!.ui as {resourceUri:string}).resourceUri);
-    assert.equal(new Set(uris).size,9);
+    assert.equal(new Set(uris).size,11);
     for(const uri of uris) {
       const resource=await client.readResource({uri});
       const content=resource.contents[0];
@@ -296,5 +311,64 @@ describe("exchangent mcp server", () => {
     const client = await connect("buyer-token");
     const result = await client.callTool({ name: "counter_offer", arguments: { session_id: IDS.session, expected_version: 2, total_cents: 480.5 } });
     assert.equal(result.isError, true);
+  });
+  test("orders and problem cases: get_order, open_case, respond_to_case forward exactly and steer the next step", async () => {
+    const client = await connect("buyer-token");
+    const order = await call(client, "get_order", { order_id: IDS.order });
+    assert.equal(order.sc.status, "ok");
+    assert.equal(order.sc.order_status, "delivered");
+    assert.match(order.sc.next, /open_case/);
+    assert.ok(Array.isArray(order.result.content) && order.result.content.length > 0);
+
+    const remedy = { kind: "keep_with_discount", amount_cents: 9000 };
+    const opened = await call(client, "open_case", { order_id: IDS.order, type: "damaged", description: "Scratch across the desktop.", requested_remedy: remedy });
+    assert.equal(opened.sc.case_status, "open");
+    assert.match(opened.sc.next, /seller's turn/);
+    const openReq = backend.requests.at(-1)!;
+    assert.equal(openReq.path, `/api/v1/orders/${IDS.order}/cases`);
+    assert.deepEqual(openReq.body, { type: "damaged", description: "Scratch across the desktop.", requested_remedy: remedy });
+    assert.match(String(openReq.headers["idempotency-key"]), /^mcp:open_case:/);
+
+    const stale = await call(client, "respond_to_case", { case_id: IDS.case, expected_version: 0, action: "accept" });
+    assert.equal(stale.sc.status, "error");
+    assert.match(stale.sc.next, /get_case/);
+    const settled = await call(client, "respond_to_case", { case_id: IDS.case, expected_version: 1, action: "counter", remedy: { kind: "keep_with_discount", amount_cents: 6000 }, note: "Meet at $60?" });
+    assert.equal(settled.sc.case_status, "resolved");
+    assert.match(settled.sc.next, /Resolved \(agreed\): keep_with_discount/);
+    assert.equal(settled.sc.refunds[0].amount_display, "$60.00");
+  });
+
+  test("seller fulfilment tools: mark_shipped and set_resolution_policy (PUT) reach the backend", async () => {
+    const client = await connect("seller-token");
+    const shipped = await call(client, "mark_shipped", { order_id: IDS.order, carrier: "UPS", tracking: "1Z999" });
+    assert.equal(shipped.sc.order_status, "shipped");
+    assert.deepEqual(backend.requests.at(-1)!.body, { carrier: "UPS", tracking: "1Z999" });
+    const policy = await call(client, "set_resolution_policy", { max_auto_partial_refund_pct: 20, return_window_days: 30 });
+    assert.equal(policy.sc.status, "ok");
+    const put = backend.requests.at(-1)!;
+    assert.equal(put.method, "PUT");
+    assert.equal(put.path, "/api/v1/seller/policy");
+  });
+
+  test("an older backend without the order routes fails politely instead of blaming the ID", async () => {
+    const client = await connect("buyer-token");
+    const list = await call(client, "list_my_orders", {});
+    assert.equal(list.sc.status, "error");
+    assert.equal(list.sc.error.code, "not_found");
+    assert.match(list.sc.next, /isn't enabled on this Exchangent server yet/);
+    const missing = await call(client, "get_order", { order_id: "00000000-0000-4000-8000-000000000000" });
+    assert.match(missing.sc.next, /isn't enabled on this Exchangent server yet/);
+    assert.match(missing.sc.next, /list_my_orders/);
+  });
+
+  test("hardening hints: no matching business, and the negotiation round limit", async () => {
+    const client = await connect("buyer-token");
+    const none = await call(client, "create_buy_order", { title: "No match", requirements: { region: "sf", items: [{ category: "desk", max_width_in: 30 }] }, budget_cents: 20000 });
+    assert.equal(none.sc.status, "ok");
+    assert.match(none.sc.next, /no business matches it yet/);
+    assert.match(none.sc.next, /deliver_by/);
+    const capped = await call(client, "counter_offer", { session_id: IDS.session, expected_version: 777, total_cents: 30000 });
+    assert.equal(capped.sc.error.code, "round_limit");
+    assert.match(capped.sc.next, /round limit/);
   });
 });

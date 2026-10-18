@@ -93,7 +93,9 @@ function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
     /** tunnels whose serveForever() was called (connect() alone does not open the data plane) */
     serving: new Set<string>(),
   };
-  const calls = { createIdentity: [] as string[], apiKeys: [] as Array<{ label: string; scopedIdentityId: string }>, cardUrls: [] as string[], emails: [] as Array<{ from: string; to: string[]; subject: string; idempotencyKey?: string }> };
+  const calls = { createIdentity: [] as string[], apiKeys: [] as Array<{ label: string; scopedIdentityId: string }>, cardUrls: [] as string[], emails: [] as Array<{ from: string; to: string[]; subject: string; idempotencyKey?: string; inReplyToMessageId?: string }>, read: [] as string[] };
+  /** inbound mail per handle (email-your-agent), any order */
+  const mail = new Map<string, Array<{ id: string; messageId: string; threadId: string; fromAddress: string; subject: string; snippet: string; direction: string; createdAt: Date }>>();
   let n = 0;
 
   const apiError = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
@@ -108,13 +110,21 @@ function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
     get id() { return this.rec.id; }
     get agentHandle() { return this.rec.handle; }
     get tunnel() { return { publicHost: `${this.rec.handle}.inkboxwire.com` }; }
+    get emailAddress() { return `${this.rec.handle}@inkboxmail.com`; }
+    async *iterEmails(opts: { direction?: string; pageSize?: number; startDatetime?: string } = {}) {
+      const all = (mail.get(this.rec.handle) || [])
+        .filter((m) => (!opts.direction || m.direction === opts.direction) && (!opts.startDatetime || m.createdAt >= new Date(opts.startDatetime)))
+        .toSorted((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      yield* all;
+    }
+    async markEmailsRead(ids: string[]) { calls.read.push(...ids); }
     // A2ASettings (camelCase, parsed by the SDK); cardUrl is the canonical card URL.
     async a2aEnable() {
       org.enabled.add(this.rec.handle);
       return { enabled: true, publiclyDiscoverable: false, allowPublicEgress: true, filterMode: "whitelist", skills: null, cardUrl: `https://inkbox.ai/a2a/${this.rec.handle}/card`, inboundTaskCount: 0, outboundTaskCount: 0, updatedAt: null };
     }
-    async sendEmail(opts: { to: string[]; subject: string; bodyText?: string; bodyHtml?: string; idempotencyKey?: string }) {
-      calls.emails.push({ from: this.rec.handle, to: opts.to, subject: opts.subject, idempotencyKey: opts.idempotencyKey });
+    async sendEmail(opts: { to: string[]; subject: string; bodyText?: string; bodyHtml?: string; idempotencyKey?: string; inReplyToMessageId?: string }) {
+      calls.emails.push({ from: this.rec.handle, to: opts.to, subject: opts.subject, idempotencyKey: opts.idempotencyKey, ...(opts.inReplyToMessageId ? { inReplyToMessageId: opts.inReplyToMessageId } : {}) });
       return { id: `msg_${calls.emails.length}` };
     }
     async a2aReply(taskId: string, opts: { intent: string; text?: string; parts?: unknown[] }) {
@@ -269,7 +279,7 @@ function makeFakeSdk({ planLimit = 3 }: { planLimit?: number } = {}) {
 
   // The fakes implement only the SDK surface InkboxTransport uses, not the full @inkbox/sdk classes.
   const sdk = { Inkbox, connect, verifyWebhook } as unknown as InkboxSdk;
-  return { sdk, org, calls, deliver };
+  return { sdk, org, calls, deliver, mail };
 }
 
 const market = {
@@ -521,6 +531,27 @@ test("receive: our own reply echoed as a2a.task.message (sender = us) is ignored
   const res = await fake.deliver({ ...sent, from: "exchangent-acme-desks" });
   assert.equal(await res.text(), "ignored");
   assert.equal(got.length, 0);
+  await transport.close();
+});
+
+test("email-your-agent: inbound mail is read oldest-first since the cursor; replies thread with In-Reply-To", async () => {
+  const { transport, fake } = makeTransport();
+  await transport.email(buyer, { to: ["x@example.com"], subject: "hi", text: "t", html: "<p>t</p>", idempotencyKey: "k0" }); // provisions the identity
+  const at = (iso: string) => new Date(iso);
+  fake.mail.set("exchangent-buyer", [
+    { id: "m1", messageId: "<m1@x>", threadId: "t1", fromAddress: "bea@x.test", subject: "old", snippet: "", direction: "inbound", createdAt: at("2026-10-18T09:00:00Z") },
+    { id: "m2", messageId: "<m2@x>", threadId: "t2", fromAddress: "bea@x.test", subject: "status?", snippet: "", direction: "inbound", createdAt: at("2026-10-18T10:01:00Z") },
+    { id: "m3", messageId: "<m3@x>", threadId: "t3", fromAddress: "bea@x.test", subject: "and now?", snippet: "", direction: "inbound", createdAt: at("2026-10-18T10:02:00Z") },
+    { id: "o1", messageId: "<o1@x>", threadId: "t2", fromAddress: "exchangent-buyer@inkboxmail.com", subject: "Re: status?", snippet: "", direction: "outbound", createdAt: at("2026-10-18T10:03:00Z") },
+  ]);
+  const got = await transport.inboundEmails(buyer, at("2026-10-18T10:00:00Z"));
+  assert.deepEqual(got.map((m) => [m.id, m.from, m.messageId]), [["m2", "bea@x.test", "<m2@x>"], ["m3", "bea@x.test", "<m3@x>"]]);
+  assert.deepEqual(await transport.inboundEmails(acme, null), [], "no identity: nothing to read");
+  await transport.markEmailsRead(buyer, ["m2"]);
+  assert.deepEqual(fake.calls.read, ["m2"]);
+  assert.deepEqual(await transport.ownEmailAddresses(), ["exchangent-buyer@inkboxmail.com"]);
+  await transport.email(buyer, { to: ["bea@x.test"], subject: "Re: status?", text: "t", html: "<p>t</p>", idempotencyKey: "exchangent-inbound-m2", inReplyToMessageId: "<m2@x>" });
+  assert.equal(fake.calls.emails.at(-1)!.inReplyToMessageId, "<m2@x>");
   await transport.close();
 });
 
