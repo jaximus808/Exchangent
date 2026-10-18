@@ -52,6 +52,27 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
   - The address comes from `buyer_email`, which only the buyer agent's view has.
   - With `TRANSPORT=inkbox` it is sent from the buyer agent's own mailbox; with `local` it is only logged.
 
+### Who the seller agents negotiate for
+
+- **Static sellers:** each seller in the principals file (`seller` tokens from `npm run agents:tokens`, e.g. the
+  seeded Bay Desk Co, Mission Ergonomics and SoMa Office Supply).
+- **Self-serve businesses** (doc/signup-contract.md): someone signs up with any email, creates a business and
+  stocks it with MCP tools. The first event for a seller that is not in the principals file makes the runner
+  mint a seller token with the worker token (`POST /api/v1/worker/sellers/:id/token`) and build a dynamic seller
+  agent for it.
+  - The agent is cached, gets its own mailbox and Inkbox identity, and its handle is registered like a
+    static seller's.
+  - Its token is minted again 10 minutes before it expires, and right away if a turn fails with a 401.
+- **Owner negotiates in chat:** when the owner turned agent negotiation off (`route.seller_delegated: false`,
+  or the mint returns `not_delegated`), seller-bound events are acked without delivery. Buyer-bound offers from
+  that business reach the buyer agent with no sender (in-process with `TRANSPORT=inkbox`).
+- **Sale email:** `order.confirmed` is a notice, never a brain turn. `SaleNotifier` (`src/notify.ts`) reads
+  `owner_email` with `get_business` and emails the owner "Sold: <title>, <total>" once, with idempotency key
+  `exchangent-sale-<order_id>`.
+  - It is sent from the seller's own Inkbox mailbox, or from the buyer agent's mailbox (the platform's) when
+    the seller has no identity here.
+  - Demo businesses without an account have no owner email, so nothing is sent.
+
 ### Mock brain rules
 
 - **Seller.** It calls `get_negotiation` and `get_inventory`. For each requirement line it picks the cheapest
@@ -93,11 +114,14 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
 
    Handles are unique across all Inkbox customers. If a handle is taken by another organization, the runner
    adds a random 4-character suffix. You can also change `INKBOX_HANDLE_PREFIX`.
-3. **Identity cap.** The free plan allows 3 identities. The demo needs one identity for the buyer plus one per
-   seller, so it needs 4 with three sellers. `INKBOX_IDENTITY_CAP` (default 3) is checked before any identity
-   is created. When the cap is reached, that seller's events fail with a clear `IdentityCapError` and stay
-   unacked, so they are retried. The other sellers keep negotiating. An HTTP 402 from Inkbox produces the same
-   error. To run more sellers, upgrade the plan (Developer allows 10) and raise the cap, or seed fewer sellers.
+3. **Identity cap.** The free plan allows 3 identities: one for the buyer agent plus one per seller.
+   `INKBOX_IDENTITY_CAP` (default 3) is checked before any identity is created. An agent that would go over the
+   cap (or that Inkbox refuses with HTTP 402) does not fail its events. The runner warns once and delivers that
+   agent's events in-process, both to it and from it. To give every seller a real identity, upgrade the plan
+   (Developer allows 10) and raise the cap.
+   - **`INKBOX_LOCAL_SELLERS`:** comma-separated seller names or IDs that always use in-process delivery, so the
+     free slots go to the sellers you want to show. Example: `Mission Ergonomics,SoMa Office Supply` keeps
+     slots for the buyer, Bay Desk Co and one self-serve business.
 4. **Tunnels.** Each identity's tunnel comes online inside this process through
    `@inkbox/sdk/tunnels/connect`, using an in-process handler. No public URL or port forwarding is needed.
    `connect()` only bootstraps the tunnel; the runner then calls `serveForever()` (which reconnects with backoff)
@@ -185,9 +209,18 @@ npm run typecheck    # tsc --noEmit
   - creating identities on demand, minting agent-scoped keys and registering handles;
   - the A2A message shape and context reuse;
   - deduplication;
-  - the identity cap and HTTP 402 handling;
+  - the identity cap, HTTP 402 and `INKBOX_LOCAL_SELLERS` falling back to in-process delivery;
   - adopting existing identities after local state is lost;
   - tunnels started with `serveForever()`, and replaying tasks that are still `submitted` after a restart.
+- **`self-serve.test.ts`:** covers self-serve businesses:
+  - dynamic seller agents minted once, cached, and re-minted near expiry;
+  - sellers whose owner negotiates in chat;
+  - retried mint failures;
+  - `order.confirmed` notices that never become turns;
+  - the sale email (sender fallback, escaping, once per order).
+
+  The second e2e test in `negotiation.e2e.test.ts` runs a self-serve business end to end: it wins the
+  negotiation with a minted token, and its owner gets the sale email.
 - **`claude.test.ts`:** checks how the command is built, and checks with `claude --help` that the installed CLI
   still accepts every flag. It never runs a real turn.
 - **`mock-brain.test.ts`:** checks the pricing and decision rules.

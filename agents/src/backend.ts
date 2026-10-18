@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-/** Outbox event kinds (doc/negotiation-contract.md, "Worker scope"). */
-export type EventKind = "session.opened" | "offer.created" | "counter.created" | "session.declined";
+/** Negotiation event kinds (doc/negotiation-contract.md, "Worker scope"): each one is a brain turn. */
+export type NegotiationKind = "session.opened" | "offer.created" | "counter.created" | "session.declined";
+
+/** Outbox event kinds. `order.confirmed` (doc/signup-contract.md) is a notice for the seller agent, never a turn. */
+export type EventKind = NegotiationKind | "order.confirmed";
 
 /**
  * Outbox payload. Only IDs, kinds and public totals; never budgets or floors.
@@ -9,15 +12,21 @@ export type EventKind = "session.opened" | "offer.created" | "counter.created" |
  *   offer.created    { session_id, request_id, offer_id, total_cents, note }
  *   counter.created  { session_id, counter_id, total_cents, note }
  *   session.declined { session_id }
+ *   order.confirmed  { order_id, reservation_id, request_id, seller_id, total_cents, currency, title }
  */
 export interface EventPayload {
-  session_id: string;
+  /** Every negotiation event carries it; order.confirmed does not. */
+  session_id?: string;
   request_id?: string;
   offer_id?: string;
   counter_id?: string;
   total_cents?: number;
   note?: string;
   seller_id?: string;
+  order_id?: string;
+  reservation_id?: string;
+  currency?: string;
+  title?: string;
   [key: string]: unknown;
 }
 
@@ -28,6 +37,8 @@ export interface EventRoute {
   request_id?: string;
   /** The request's delegate_negotiation: the buyer lets the buyer agent negotiate. */
   delegated?: boolean;
+  /** The seller's delegate_negotiation: the owner lets the seller agent negotiate (false: they negotiate in chat). */
+  seller_delegated?: boolean;
   /** Preferred Inkbox handle when the recipient's identity is created. */
   agent_handle?: string;
 }
@@ -39,6 +50,15 @@ export interface WorkerEvent {
   created_at: string;
   payload: EventPayload;
   route?: EventRoute;
+}
+
+/** POST /worker/sellers/:id/token: a seller-scope token for the platform seller agent (doc/signup-contract.md). */
+export interface SellerAgentToken {
+  token: string;
+  seller_id: string;
+  name: string;
+  expires_at: string;
+  agent_handle?: string | null;
 }
 
 export class BackendError extends Error {
@@ -106,6 +126,13 @@ export class WorkerApi {
 
   async ack(eventId: string): Promise<unknown> {
     return this.#request("POST", `/worker/events/${encodeURIComponent(eventId)}/ack`, {}, { idempotencyKey: `ack-${eventId}` });
+  }
+
+  /** Mint a seller token for a business whose owner delegated negotiation (403 not_delegated otherwise). */
+  async mintSellerToken(sellerId: string, hours?: number): Promise<SellerAgentToken> {
+    const data = await this.#request("POST", `/worker/sellers/${encodeURIComponent(sellerId)}/token`, hours ? { hours } : {});
+    // Follows the backend contract (SellerAgentToken); token presence is checked by the caller.
+    return data as SellerAgentToken;
   }
 
   async registerSellerAgent(sellerId: string, agentHandle: string): Promise<unknown> {

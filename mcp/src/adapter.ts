@@ -173,6 +173,10 @@ export function errorNext(code: string, nextAction: string | undefined, hint: Hi
       return "The saved total differs from the approved amount. Re-read the offers and ask the human to approve the current total before retrying.";
     case "invalid_input":
       return "The backend rejected the inputs; fix them according to the error message and retry once.";
+    case "business_name_taken":
+      return "Another business already uses that name (names are unique, ignoring case); ask the human for a different business name and retry.";
+    case "business_limit":
+      return "This account already has the maximum number of businesses (5); manage an existing one instead (reconnect and choose it).";
     case "not_found":
       return `That ID was not found or is not visible to you; re-check the ID with ${hint.reread}.`;
     case "backend_unreachable":
@@ -189,7 +193,7 @@ export function errorNext(code: string, nextAction: string | undefined, hint: Hi
 // ---------------------------------------------------------------------------
 
 export interface BackendCall {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PATCH";
   /** Path below the API base, e.g. `/sessions/<id>/offers`. */
   path: string;
   query?: Record<string, string | undefined>;

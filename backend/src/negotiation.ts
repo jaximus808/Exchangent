@@ -1,13 +1,13 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { CommerceError } from './commerce.ts';
 import type {
- AgentHandle, ApiError, CreatedCounter, CreatedOffer, CreatedRequest, DbError, DeclinedSession, DelegatedBuyer, DelegatedBuyerEmail, ErrorCode, EventAck,
+ AgentHandle, ApiError, BusinessJson, CreatedCounter, CreatedOffer, CreatedRequest, DbError, DeclinedSession, DelegatedBuyer, DelegatedBuyerEmail, ErrorCode, EventAck,
  InventoryItem, OfferJson, Requirements, RequestState, RoleScope, RolePrincipal, RpcDb, SellerSession, SessionJson,
- SessionState, WorkerEvent,
+ RegisteredBusiness, SellerAgentToken, SessionState, WorkerEvent,
 } from './types.ts';
 
 const STATUS: Partial<Record<ErrorCode,number>>={unauthorized:401,forbidden:403,not_found:404,session_not_found:404,request_not_found:404,
- event_not_found:404,seller_not_found:404,invalid_input:400,invalid_id:400,idempotency_key_required:400,
+ event_not_found:404,seller_not_found:404,not_delegated:403,invalid_input:400,invalid_id:400,idempotency_key_required:400,
  body_too_large:413,database_error:503};
 export const statusFor=(code: ErrorCode)=>STATUS[code]??409;
 export function fail(code: ErrorCode,detail?: string) {
@@ -49,6 +49,9 @@ export const NEXT_ACTIONS: Partial<Record<ErrorCode,string>>={
  reservation_expired:'The hold expired. Reserve the current offer again with a new Idempotency-Key.',
  reservation_not_payable:'This reservation can no longer be paid. Call get_reservation_status, then reserve a current offer again.',
  payment_pending:'Payment is processing. Check get_reservation_status later.',
+ business_name_taken:'Another business already uses that name. Choose a different name.',
+ business_limit:'This account already owns 5 businesses. Manage an existing one instead.',
+ not_delegated:'The owner turned off agent negotiation for this business. Skip it; only the owner can act for it.',
  body_too_large:'Send a smaller JSON body.',
  database_error:'Temporary backend problem. Retry the same call with the same Idempotency-Key.',
 };
@@ -57,6 +60,8 @@ export const MESSAGES: Partial<Record<ErrorCode,string>>={
  stale_offer:'expected_version does not match the current session version, or the offer was superseded.',
  not_your_turn:'It is the other party\'s turn in this negotiation.',session_closed:'The negotiation is not open.',
  below_floor:'A unit price is below that item\'s floor.',out_of_stock:'Not enough available stock.',
+ business_name_taken:'That business name is taken.',business_limit:'Business limit reached.',
+ not_delegated:'This business does not let the seller agent negotiate for it.',
  budget_exceeded:'The total exceeds the buyer budget.',requirements_mismatch:'The offer does not match the request requirements.',
  idempotency_conflict:'Idempotency-Key reused with a different body.',idempotency_key_required:'Idempotency-Key header is required.',
  invalid_input:'The request body is invalid.',database_error:'The backend is temporarily unavailable.',
@@ -297,5 +302,45 @@ export class Negotiation {
   this.need(p,'worker');
   return this.rpc<AgentHandle>('commerce_set_agent_handle',{p_seller:id(sellerId),
    p_handle:text(object(body).agent_handle,'agent_handle',200,{optional:false})});
+ }
+
+ // Businesses (self-serve sign-up, doc/signup-contract.md). The SQL functions re-check every field.
+ async registerBusinessFor(actorId: string,body: unknown) {
+  const b=object(body);
+  return this.rpc<BusinessJson>('commerce_register_business',{p_actor:actorId,p_name:text(b.name,'name',80,{optional:false}),
+   p_service_area:text(b.service_area,'service_area',40),p_delivery_cents:int(b.delivery_cents,'delivery_cents',{max:100000,optional:true}),
+   p_delivery_days:int(b.delivery_days,'delivery_days',{max:30,optional:true})});
+ }
+ /** A signed-in person (buyer token or buyer connector) registers a business they will own. */
+ async registerBusiness(p: RolePrincipal,body: unknown): Promise<RegisteredBusiness> {
+  this.need(p,'buyer');
+  const business=await this.registerBusinessFor(p.actor_id,body);
+  return {business,next:`Reconnect Exchangent in your assistant and choose ${business.name} to manage it.`};
+ }
+ async getBusiness(p: RolePrincipal) {
+  this.need(p,'seller');
+  return this.rpc<BusinessJson>('commerce_business_json',{p_seller:p.seller_id});
+ }
+ /** Settings and stock belong to the owner: agent tokens (label agents:*) negotiate but never edit. */
+ ownerOnly(p: RolePrincipal) {
+  this.need(p,'seller');
+  if(p.label?.startsWith('agents:')) throw fail('forbidden','Only the business owner can change settings or inventory');
+ }
+ async updateBusiness(p: RolePrincipal,body: unknown) {
+  this.ownerOnly(p);
+  return this.rpc<BusinessJson>('commerce_update_business',{p_seller:p.seller_id,p_patch:object(body)});
+ }
+ async upsertInventory(p: RolePrincipal,body: unknown) {
+  this.ownerOnly(p);
+  return this.rpc<InventoryItem>('commerce_upsert_inventory',{p_seller:p.seller_id,p_item:object(body)});
+ }
+ /** Worker: a short-lived token for the platform seller agent, only for businesses that delegated. */
+ async mintSellerAgentToken(p: RolePrincipal,sellerId: unknown,body: unknown): Promise<SellerAgentToken> {
+  this.need(p,'worker');
+  const hours=int(object(body).hours,'hours',{min:1,max:72,optional:true})??24;
+  const token=randomBytes(32).toString('hex');
+  const minted=await this.rpc<Omit<SellerAgentToken,'token'>>('commerce_mint_seller_agent_token',
+   {p_seller:id(sellerId),p_token_hash:hashToken(token),p_hours:hours});
+  return {token,...minted};
  }
 }

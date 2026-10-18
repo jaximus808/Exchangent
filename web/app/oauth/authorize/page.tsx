@@ -29,7 +29,7 @@ function SignInView({expired}:{expired?:boolean}) {
  const configured=Boolean(process.env.NEXT_PUBLIC_INSFORGE_URL&&process.env.NEXT_PUBLIC_INSFORGE_ANON_KEY);
  if(!configured) return <ErrorView title="Sign-in is unavailable" message="Exchangent sign-in isn’t configured on this server yet, so your assistant can’t be connected right now. Please try again later."/>;
  return <Shell>
-  <div className="oauth-heading"><h1>Sign in to connect your assistant</h1><p>Sign in or create your Exchangent account to connect Claude, ChatGPT or another assistant. A new email creates an account.</p></div>
+  <div className="oauth-heading"><h1>Sign in to connect your assistant</h1><p>Use any email address to sign in or sign up. A new email creates your Exchangent account; next you choose to buy, or to sell as a business you own or create now.</p></div>
   {expired&&<p className="form-error" role="status">Your session ended. Sign in again to continue.</p>}
   <OAuthSignIn/>
   <p className="fine-print">No password to remember. You’ll choose exactly what to connect on the next step.</p>

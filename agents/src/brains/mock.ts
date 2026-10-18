@@ -269,6 +269,13 @@ export function concedeLines(bundle: BundleItem[], previousOffer: OfferView | nu
   });
 }
 
+/** First-offer note from the owner's item titles (any business, any items). */
+export function openingNote(bundle: BundleItem[]): string {
+  const titles = bundle.map((b) => b.title).filter(Boolean);
+  const what = titles.length > 2 ? `${titles.slice(0, -1).join(", ")} and ${titles.at(-1)}` : titles.join(" and ");
+  return `${what || "Your order"}, delivered.`.slice(0, 200);
+}
+
 const sumLines = (lines: OfferLine[], delivery: number): number => lines.reduce((s, l) => s + l.unit_cents * l.quantity, 0) + delivery;
 
 /**
@@ -293,7 +300,7 @@ export function decideSeller(neg: Negotiation, inventory: InventoryItem[]): Sell
   }
   const priorOffers = neg.offers.length;
   if (!priorOffers) {
-    return { action: "offer", lines: concedeLines(bundle, null, 0), deliveryCents, note: "Desk and chair bundle, delivered.", reason: "opens at list" };
+    return { action: "offer", lines: concedeLines(bundle, null, 0), deliveryCents, note: openingNote(bundle), reason: "opens at list" };
   }
   const lines = concedeLines(bundle, neg.latestOffer, priorOffers);
   const atFloor = lines.every((l, i) => l.unit_cents === bundle[i].floorCents);
@@ -321,11 +328,14 @@ export function decideBuyer(order: BuyOrder, sessionId: string | undefined): Buy
     if (s.rounds >= BUYER_STOP_ROUND && budgetCents !== null && t <= budgetCents) return true;
     return false;
   });
+  const s = order.sessions.find((x) => x.sessionId === sessionId);
   if (acceptable.length) {
     const best = acceptable.sort((a, b) => a.offer.totalCents - b.offer.totalCents)[0];
-    return { action: "ready", session: best, offer: best.offer };
+    // A cheaper offer that is not acceptable yet (e.g. a late seller): keep haggling with it, never above the deal in hand.
+    const cheaper = s && s !== best && s.status === "open" && s.offer && (!s.turn || s.turn === "buyer") &&
+      s.offer.totalCents < best.offer.totalCents && s.rounds < BUYER_MAX_ROUNDS;
+    if (!cheaper) return { action: "ready", session: best, offer: best.offer };
   }
-  const s = order.sessions.find((x) => x.sessionId === sessionId);
   if (!s || s.status !== "open") return { action: "wait", reason: "session not open" };
   if (s.turn && s.turn !== "buyer") return { action: "wait", reason: "not our turn" };
   if (!s.offer) return { action: "wait", reason: "no offer yet" };
@@ -393,7 +403,8 @@ export function createMockBrain({ mcpFor }: { mcpFor: (agent: Agent) => Promise<
       log.warn("no request_id for event; cannot read the buy order", { agent: agent.id, kind: event.kind, session: sessionId });
       return { action: "noop" };
     }
-    if (ready.has(requestId)) {
+    // Once ready, only a new seller offer can change the deal (a late or cheaper seller).
+    if (ready.has(requestId) && event.kind !== "offer.created") {
       log.info("already ready to reserve; ignoring", { agent: agent.id, offer_id: ready.get(requestId)!.offerId });
       return { action: "noop" };
     }
@@ -404,6 +415,10 @@ export function createMockBrain({ mcpFor }: { mcpFor: (agent: Agent) => Promise<
     const move = decideBuyer(order, sessionId);
 
     if (move.action === "ready") {
+      if (ready.get(requestId)?.offerId === move.offer.offerId) {
+        log.info("already ready to reserve; ignoring", { agent: agent.id, offer_id: move.offer.offerId });
+        return { action: "noop" };
+      }
       ready.set(requestId, move.offer);
       log.info(`READY TO RESERVE: offer ${move.offer.offerId}`, {
         agent: agent.id,

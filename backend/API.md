@@ -198,6 +198,61 @@ npm run agents:tokens --prefix backend
 npm run agents:tokens --prefix backend -- --seller "Bay Desk Co" --seller <seller-uuid> --hours 24
 ```
 
+## Businesses and the seller agent
+
+Migration: `migrations/20261018000600_self-serve-signup.sql`. Code: `src/negotiation.ts`
+(`registerBusiness`, `ownerOnly`, `mintSellerAgentToken`). Contract: `doc/signup-contract.md`.
+
+Anyone who signs in can register a business they will own. No seeding is needed. A business matches
+new buy requests as soon as it has stock in the request's region.
+
+Each business has `delegate_negotiation`, the owner's "let my agent negotiate" setting (default `true`).
+While it is on, the worker can mint a short-lived seller token for the platform seller agent.
+
+| Route (`/api/v1`) | Who | Behaviour |
+| --- | --- | --- |
+| `POST /businesses` with an InsForge user session | Consent page "Create a business" | Body `{ name, service_area?, delivery_cents?, delivery_days? }`. **201** with the business JSON (below). The person becomes the owner. Delegation (`exg_`) tokens get `403 user_session_required` |
+| `POST /businesses` with a buyer role or connector token | MCP `register_business` | Same body. **200** `{ business, next }`. `next` is "Reconnect Exchangent in your assistant and choose <name> to manage it." `buyer_agent`, `seller` and `worker` get `403 forbidden` |
+| `GET /seller/business` | seller, including agent tokens | The business JSON |
+| `PATCH /seller/business` | seller (the owner) | Any of `{ name, service_area, delivery_cents, delivery_days, delegate_negotiation }`. Any other key, such as `enabled`, is `400 invalid_input`. Turning `delegate_negotiation` off revokes the seller agent's tokens at once. Agent tokens (label `agents:*`) get `403 forbidden` |
+| `POST /seller/inventory` | seller (the owner) | Upserts one item by `(seller, sku)`, so it needs no Idempotency-Key. Fields are described below. Returns the item in the `GET /seller/inventory` shape, including `floor_cents`. Agent tokens get `403 forbidden` |
+| `POST /worker/sellers/:id/token` | worker | Body `{ hours? }` (1–72, default 24). **200** `{ token, seller_id, name, expires_at, agent_handle }`. `token` is 64-hex and returned once; only its sha256 hash is stored, with label `agents:seller-agent:<seller_id>`. It acts as the business's owner, like the seeded agent seller tokens. Errors: `404 seller_not_found`; `403 not_delegated` (delegation off or business disabled) |
+
+**Business JSON** (`commerce_business_json`, never shown to buyers):
+`{ seller_id, name, service_area, delivery_cents, delivery_days, delegate_negotiation, enabled, agent_handle, created_at, owner_email }`.
+`owner_email` is the owner's account email, or `null` for demo actors.
+
+**Validation:**
+- `name`: 2–80 characters after trimming.
+- `service_area`: `^[a-z_]{2,40}$`, default `san_francisco`.
+- `delivery_cents`: 0–100000, default 0.
+- `delivery_days`: 0–30, default 2.
+- At most 5 businesses per person (`409 business_limit`).
+- **Unique names:** names are unique case-insensitively among all businesses, enabled or not (`409 business_name_taken`). Older rows may already share names, so this is enforced inside register and rename under a per-name advisory lock, not by an index.
+
+**Inventory item** (`POST /seller/inventory`):
+`{ sku?, title, category, attributes?, list_cents, floor_cents, available }`.
+- `sku`: if omitted, derived from the title (lowercase, dashes, at most 60 characters).
+- `category`: `^[a-z_]{2,40}$`.
+- `attributes`: an object.
+- Prices: integers, with 0 < `floor_cents` ≤ `list_cents`.
+- `available`: 0–100000.
+- Other keys are rejected.
+
+**Matching** uses the attributes. A request item `{category:"desk", max_width_in:48}` needs
+`attributes.width_in <= 48`, and `{category:"chair", ergonomic:true}` needs `attributes.ergonomic === true`.
+
+**Worker feed changes** (`GET /worker/events`):
+- Every route now carries `route.seller_delegated` (the business's `delegate_negotiation`).
+- New kind `order.confirmed`, a sale notice to the seller:
+  - `route`: `{ to_role: "seller", seller_id, request_id, buyer_id, agent_handle?, delegated, seller_delegated }`.
+  - `payload`: `{ order_id, reservation_id, request_id, seller_id, total_cents, currency, title }`. It has no
+    buyer email, budget or floor.
+- **Backing row:** each paid order writes the notice as its own outbox row (kind `order.confirmed.seller`,
+  from a trigger on `commerce_orders`). The worker never touches the buyer receipt email's `order.confirmed`
+  row: acking that row's ID is `404 event_not_found`.
+- `POST /worker/events/:id/ack` on a sale notice returns `kind: "order.confirmed"`.
+
 ## MCP and dashboard integration
 
 - The Manufact MCP OAuth handshake belongs to the teammate. An arbitrary ChatGPT,

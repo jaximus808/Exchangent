@@ -2,8 +2,12 @@
 // from its own Inkbox mailbox (TRANSPORT=inkbox) or as a log line (TRANSPORT=local). The numbers in the email
 // are re-read from get_buy_order, never taken from the turn result. buyer_email is only in the buyer agent's
 // view of an order (backend buyer_agent scope); a demo buyer without an account has none, so nothing is sent.
+//
+// "Sold" email (doc/signup-contract.md): on order.confirmed the seller agent tells the business owner, with the
+// owner's email from get_business (seller scope). Demo businesses without an account have none.
 
-import type { Agent } from "./agents.ts";
+import type { Agent, SellerAgent } from "./agents.ts";
+import type { WorkerEvent } from "./backend.ts";
 import type { McpToolClient } from "./mcp.ts";
 import type { TurnEvent, TurnResult } from "./runner.ts";
 import type { Transport } from "./transport/index.ts";
@@ -39,6 +43,8 @@ interface Deal {
   totalCents: number;
   offerId: string;
   requestId: string;
+  /** A later, cheaper deal on an order that already got an email. */
+  better?: boolean;
 }
 
 /** Build the email for one agreed deal. */
@@ -64,10 +70,10 @@ export function dealEmail(d: Deal): EmailMessage {
     `<p>${esc(next)}</p><p>Nothing has been reserved or charged yet. You approve the payment.</p><p>- Exchangent buyer agent</p>`;
   return {
     to: [d.email],
-    subject: `Deal reached: ${d.seller}, ${total}`,
+    subject: `${d.better ? "Better deal" : "Deal reached"}: ${d.seller}, ${total}`,
     text,
     html,
-    idempotencyKey: `exchangent-deal-${d.requestId}`,
+    idempotencyKey: d.better ? `exchangent-deal-${d.requestId}-${d.offerId}` : `exchangent-deal-${d.requestId}`,
   };
 }
 
@@ -94,9 +100,13 @@ export function dealFromOrder(raw: unknown, offerId: string): Omit<Deal, "email"
   return null;
 }
 
-/** Sends at most one "deal reached" email per order per runner process (and the key dedupes across restarts). */
+/**
+ * Sends one "deal reached" email per order, and a "better deal" email if the buyer agent later settles on a
+ * different (cheaper) offer. Idempotency keys dedupe across restarts.
+ */
 export class DealNotifier {
-  #sent = new Set<string>();
+  /** request_id -> offer_id last emailed */
+  #sent = new Map<string, string>();
   transport: Transport;
   mcpFor: (agent: Agent) => Promise<McpToolClient>;
 
@@ -109,18 +119,100 @@ export class DealNotifier {
   async afterTurn(agent: Agent, event: TurnEvent, result: TurnResult): Promise<void> {
     const offerId = readyOfferId(result);
     const requestId = event.payload?.request_id;
-    if (agent.role !== "buyer" || !offerId || !requestId || this.#sent.has(requestId)) return;
+    if (agent.role !== "buyer" || !offerId || !requestId || this.#sent.get(requestId) === offerId) return;
+    const previous = this.#sent.get(requestId);
     try {
       const mcp = await this.mcpFor(agent);
       const deal = dealFromOrder(await mcp.call("get_buy_order", { request_id: requestId }), offerId);
       if (!deal) return log.warn("deal email skipped: offer not found on the order", { request: short(requestId), offer: short(offerId) });
       if (!deal.email) return log.info("deal email skipped: buyer has no email on file", { request: short(requestId) });
-      this.#sent.add(requestId);
-      await this.transport.email(agent, dealEmail({ ...deal, email: deal.email, requestId }));
-      log.info("deal email sent", { request: short(requestId), seller: deal.seller, total_cents: deal.totalCents });
+      this.#sent.set(requestId, offerId);
+      await this.transport.email(agent, dealEmail({ ...deal, email: deal.email, requestId, better: previous !== undefined }));
+      log.info(previous ? "better deal email sent" : "deal email sent", { request: short(requestId), seller: deal.seller, total_cents: deal.totalCents });
     } catch (err) {
-      this.#sent.delete(requestId);
+      if (previous === undefined) this.#sent.delete(requestId);
+      else this.#sent.set(requestId, previous);
       log.error("deal email failed", { request: short(requestId), error: (err as Error).message });
+    }
+  }
+}
+
+/** Build the email for one paid order. */
+export function saleEmail({ email, business, title, totalCents, orderId }: { email: string; business: string; title: string; totalCents: number; orderId: string }): EmailMessage {
+  const total = money(totalCents);
+  const text = [
+    `Your sales agent for ${business} closed a sale: "${title}".`,
+    "",
+    `Total paid, delivered: ${total}`,
+    `Order: ${orderId}`,
+    "",
+    "The buyer approved and paid (Stripe test mode). The stock is marked sold.",
+    'Open Claude (Exchangent connector, signed in as your business) and say "show my inventory" to see what is left.',
+    "",
+    `- ${business} sales agent on Exchangent`,
+  ].join("\n");
+  const html =
+    `<p>Your sales agent for <b>${esc(business)}</b> closed a sale: <b>${esc(title)}</b>.</p>` +
+    `<table><tr><td>Total paid, delivered</td><td><b>${esc(total)}</b></td></tr><tr><td>Order</td><td><code>${esc(orderId)}</code></td></tr></table>` +
+    `<p>The buyer approved and paid (Stripe test mode). The stock is marked sold.</p><p>- ${esc(business)} sales agent on Exchangent</p>`;
+  return { to: [email], subject: `Sold: ${title}, ${total}`, text, html, idempotencyKey: `exchangent-sale-${orderId}` };
+}
+
+/** The business profile fields the sale email needs, from a get_business result. */
+export function businessFromResult(raw: unknown): { name: string | null; ownerEmail: string | null } {
+  const top = rec(raw);
+  const b = rec(top.business ?? top);
+  const email = b.owner_email ?? top.owner_email;
+  return { name: typeof b.name === "string" ? b.name : null, ownerEmail: typeof email === "string" && email ? email : null };
+}
+
+/**
+ * order.confirmed -> one "Sold" email to the business owner. Sent from the seller's own mailbox when it has
+ * one, else from the buyer agent's (the platform mailbox). Never throws: the event is acked either way.
+ */
+export class SaleNotifier {
+  #sent = new Set<string>();
+  transport: Transport;
+  mcpFor: (agent: Agent) => Promise<McpToolClient>;
+  platform: () => Agent;
+
+  constructor({ transport, mcpFor, platform }: { transport: Transport; mcpFor: (agent: Agent) => Promise<McpToolClient>; platform: () => Agent }) {
+    this.transport = transport;
+    this.mcpFor = mcpFor;
+    this.platform = platform;
+  }
+
+  async onOrder(seller: SellerAgent, event: WorkerEvent): Promise<void> {
+    const p = event.payload || {};
+    const orderId = p.order_id;
+    if (!orderId || this.#sent.has(orderId)) return;
+    try {
+      const mcp = await this.mcpFor(seller);
+      const biz = businessFromResult(await mcp.call("get_business", {}));
+      if (!biz.ownerEmail) return log.info("sale email skipped: business owner has no email on file", { seller: seller.name, order: short(orderId) });
+      const message = saleEmail({
+        email: biz.ownerEmail,
+        business: biz.name || seller.name,
+        title: String(p.title || "an order"),
+        totalCents: Number(p.total_cents),
+        orderId,
+      });
+      this.#sent.add(orderId);
+      let from: Agent = this.transport.hasMailbox?.(seller) === false ? this.platform() : seller;
+      try {
+        await this.transport.email(from, message);
+      } catch (err) {
+        if (from === seller) {
+          // No identity for the seller after all (e.g. the cap): send from the platform mailbox instead.
+          from = this.platform();
+          log.warn("sale email: seller has no mailbox, using the platform mailbox", { seller: seller.name, error: (err as Error).message });
+          await this.transport.email(from, message);
+        } else throw err;
+      }
+      log.info("sale email sent", { seller: seller.name, from: from.id, order: short(orderId), total_cents: p.total_cents });
+    } catch (err) {
+      this.#sent.delete(orderId);
+      log.error("sale email failed", { seller: seller.name, order: short(orderId), error: (err as Error).message });
     }
   }
 }

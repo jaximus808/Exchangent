@@ -11,6 +11,9 @@
 // - The A2A protocol endpoint needs a claimed identity's agent-scoped key (a2aClient() checks whoami).
 // - The canonical card URL comes back from the A2A settings (a2aEnable() -> cardUrl).
 // - Webhook `data.caller` is the task's requester; `data.sender` (optional) is the message's author.
+//
+// Agents without an identity are delivered in-process instead (doc/signup-contract.md): sellers listed in
+// INKBOX_LOCAL_SELLERS, and any agent whose identity would exceed the cap (warned once per agent).
 
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -67,6 +70,8 @@ export interface InkboxTransportOptions extends InkboxTransportDeps {
   /** max identities this runner may create (free plan: 3) */
   identityCap?: number;
   handlePrefix?: string;
+  /** seller names or IDs (lowercase) that never get an identity: always in-process delivery */
+  localSellers?: string[];
   stateDir: string;
   /** how long to wait for a new tunnel to report "connected" before going on (Inkbox retries deliveries) */
   tunnelConnectTimeoutMs?: number;
@@ -210,12 +215,15 @@ export class InkboxTransport implements Transport {
   #cards = new Map<string, A2AResolvedTarget>();
   #seenWebhooks = new Set<string>();
   #agents = new Map<string, Agent>();
+  /** agent ids that fell back to in-process delivery because the identity cap was reached */
+  #overCap = new Set<string>();
 
   apiKey: string | undefined;
   baseUrl: string | undefined;
   a2aBaseUrl: string;
   identityCap: number;
   handlePrefix: string;
+  localSellers: Set<string>;
   stateDir: string;
   tunnelConnectTimeoutMs: number;
   backend: SellerRegistrar | undefined;
@@ -227,12 +235,13 @@ export class InkboxTransport implements Transport {
   /** Set once Inkbox answers 402 (plan limit), so later events fail fast. */
   planLimitError?: string;
 
-  constructor({ apiKey, baseUrl, a2aBaseUrl = "https://inkbox.ai", identityCap = 3, handlePrefix = "exchangent", stateDir, tunnelConnectTimeoutMs = 30_000, backend, sdk, now = () => Date.now() }: InkboxTransportOptions) {
+  constructor({ apiKey, baseUrl, a2aBaseUrl = "https://inkbox.ai", identityCap = 3, handlePrefix = "exchangent", localSellers = [], stateDir, tunnelConnectTimeoutMs = 30_000, backend, sdk, now = () => Date.now() }: InkboxTransportOptions) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
     this.a2aBaseUrl = a2aBaseUrl;
     this.identityCap = identityCap;
     this.handlePrefix = handlePrefix;
+    this.localSellers = new Set(localSellers.map((x) => x.trim().toLowerCase()).filter(Boolean));
     this.stateDir = stateDir;
     this.tunnelConnectTimeoutMs = tunnelConnectTimeoutMs;
     this.backend = backend;
@@ -258,11 +267,35 @@ export class InkboxTransport implements Transport {
     this.#agents.set(agent.id, agent);
   }
 
+  /** True if this agent has no Inkbox identity here and is delivered in-process (INKBOX_LOCAL_SELLERS or over cap). */
+  isLocal(agent: Agent): boolean {
+    if (this.#overCap.has(agent.id)) return true;
+    return agent.role === "seller" && (this.localSellers.has(agent.name.toLowerCase()) || this.localSellers.has(agent.sellerId.toLowerCase()));
+  }
+
+  /** Whether email can come from this agent's own mailbox (it has, or may get, an identity). */
+  hasMailbox(agent: Agent): boolean {
+    return !this.isLocal(agent);
+  }
+
+  /** The agent's identity, or null when it is delivered in-process (local seller, or the cap was reached now). */
+  async #identityOrLocal(agent: Agent, hintHandle?: string): Promise<IdentityRecord | null> {
+    if (this.isLocal(agent)) return null;
+    try {
+      return await this.ensureIdentity(agent, hintHandle);
+    } catch (err) {
+      if (!(err instanceof IdentityCapError)) throw err;
+      this.#overCap.add(agent.id);
+      log.warn("no Inkbox identity for this agent; delivering in-process instead", { agent: agent.id, name: agent.name, reason: err.message });
+      return null;
+    }
+  }
+
   /** Reconnect tunnels for identities created in earlier runs and catch up on queued tasks. */
   async start(agents: Agent[]): Promise<void> {
     for (const agent of agents) {
       this.#agents.set(agent.id, agent);
-      if (this.state.data.identities[agent.id]) {
+      if (this.state.data.identities[agent.id] && !this.isLocal(agent)) {
         try {
           await this.ensureIdentity(agent);
           await this.#catchUp(agent);
@@ -534,19 +567,17 @@ export class InkboxTransport implements Transport {
 
   /** Send one outbox event as an A2A message from fromAgent's identity to toAgent's identity. */
   async send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<void> {
-    if (!fromAgent) {
-      if (toAgent.role === "buyer") {
-        throw new Error(`cannot tell which seller sent ${event.kind}; the backend should set route.seller_id on buyer-bound events`);
-      }
-      // The buyer is a person in chat, not an identity of ours: there is no sender, so deliver in-process.
+    // No sender agent (a person negotiating in chat), or either side has no identity: deliver in-process.
+    const fromRec = fromAgent ? await this.#identityOrLocal(fromAgent) : null;
+    const toRec = fromRec ? await this.#identityOrLocal(toAgent, event.route?.agent_handle) : null;
+    if (!fromAgent || !fromRec || !toRec) {
       const handler = this.#handlers.get(toAgent.id);
       if (!handler) throw new Error(`no receiver for ${toAgent.id}`);
-      await handler(toMessage(null, event));
-      log.info("delivered in-process (buyer has no agent)", { to: toAgent.id, kind: event.kind, event: event.id });
+      await handler(toMessage(fromAgent, event));
+      const why = !fromAgent ? "counterparty negotiates in chat" : `${(fromRec ? toAgent : fromAgent).name} has no Inkbox identity`;
+      log.info("delivered in-process", { from: fromAgent?.id, to: toAgent.id, kind: event.kind, event: event.id, why });
       return;
     }
-    await this.ensureIdentity(fromAgent);
-    const toRec = await this.ensureIdentity(toAgent, event.route?.agent_handle);
     const a2a = await this.#a2a(fromAgent.id);
     const target = await this.#card(fromAgent.id, toRec);
     const sessionId = event.payload?.session_id;
@@ -567,7 +598,7 @@ export class InkboxTransport implements Transport {
 
   /** Send from the agent's own Inkbox mailbox (every identity has one). */
   async email(from: Agent, message: EmailMessage): Promise<void> {
-    await this.ensureIdentity(from);
+    if (!(await this.#identityOrLocal(from))) throw new IdentityCapError(`${from.name} has no Inkbox identity (mailbox) in this runner`);
     const me = await this.#agentIdentity(from.id);
     await me.sendEmail({
       to: message.to,

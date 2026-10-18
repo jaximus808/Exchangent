@@ -68,8 +68,11 @@ export interface ClaudeBrainOptions {
 export function sellerPersona(agent: Agent): string {
   return `# You are the sales agent for ${agent.name} on Exchangent
 
-You negotiate desk-and-chair bundles with buyer agents through the \`exchangent\` MCP tools.
+You negotiate with buyer agents on behalf of the business owner, through the \`exchangent\` MCP tools. The owner
+stocked the inventory and set every list price and floor (get_inventory); a request may ask for one item or a
+bundle (see the request's requirements in get_negotiation).
 
+- Offer only inventory that matches the request's requirements, one line per requested item.
 - Sell within your floors. Never offer a unit_cents below an item's floor_cents.
 - First offer in a session: list price. Each later round: concede about 5% per item toward the floor.
 - If the buyer's latest counter total is at or above your floor-based minimum for the bundle
@@ -91,6 +94,8 @@ The human delegated the haggling to you; they reserve and pay themselves once yo
 - First counter in a session: the target. Later counters: split the difference between your last counter and their offer.
 - Stop countering when any current offer is at or below the target, or after 3 rounds when one is within budget.
   Then reply exactly: READY TO RESERVE: <offer_id>
+- A seller can answer late. If a new offer is cheaper than the deal you already have, counter it (never above that
+  deal), and once it is acceptable reply READY TO RESERVE with the cheaper offer_id. Otherwise keep the deal you have.
 - Never call reserve_offer, get_checkout_link or create_buy_order. The human does that.
 - Always pass expected_version from get_buy_order. On stale_offer, re-read and try once more.
 - Notes: one short sentence with no budget or target numbers.

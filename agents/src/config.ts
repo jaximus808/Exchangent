@@ -38,6 +38,8 @@ export interface InkboxConfig {
   a2aBaseUrl?: string;
   identityCap?: number;
   handlePrefix?: string;
+  /** INKBOX_LOCAL_SELLERS: seller names or IDs that always use in-process delivery (no identity). */
+  localSellers?: string[];
 }
 
 /** BRAIN=claude settings. Every field is optional: the Claude brain has a default for each. */
@@ -122,6 +124,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       a2aBaseUrl: (env.INKBOX_A2A_BASE_URL || "https://inkbox.ai").replace(/\/+$/, ""),
       identityCap: Number(env.INKBOX_IDENTITY_CAP || 3),
       handlePrefix: env.INKBOX_HANDLE_PREFIX || "exchangent",
+      localSellers: (env.INKBOX_LOCAL_SELLERS || "").split(",").map((x) => x.trim()).filter(Boolean),
     },
     claude: {
       bin: env.CLAUDE_BIN || "claude",

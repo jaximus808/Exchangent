@@ -20,7 +20,8 @@ const server = new MCPServer({
       ? "The account the human authorized when connecting (their buyer account or one of their businesses) decides your role; call whoami to check it."
       : "Your bearer token decides your role; call whoami to check it.",
     "Buyers: create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status.",
-    "Sellers: list_my_requests, get_negotiation, get_inventory, make_offer, decline_request.",
+    "Sellers: list_my_requests, get_negotiation, get_inventory, make_offer, decline_request; owners also get_business, update_business, upsert_inventory_item.",
+    "Anyone signed in as a buyer can open a business with register_business, then reconnect and choose it.",
     "All money inputs are integer US cents (*_cents). Always re-read state (get_negotiation / get_buy_order) and pass the session version as expected_version.",
     "Every result has status (ok|error) and next: follow next. Payment is only ever approved by the human in Stripe Checkout.",
   ].join("\n"),
@@ -29,6 +30,6 @@ const server = new MCPServer({
   ...((mode === "oauth" ? { oauth: createOAuthProvider() } : {}) as {}),
 });
 
-export const {whoami, create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request}=registerTools(server);
+export const {whoami, create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request, register_business, get_business, update_business, upsert_inventory_item}=registerTools(server);
 
 export default server;

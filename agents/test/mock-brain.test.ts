@@ -66,3 +66,19 @@ test("normalizeNegotiation does not confuse the tool status with the session sta
   assert.equal(normalizeNegotiation({ status: "ok", session_status: "declined" }).status, "declined");
   assert.equal(normalizeNegotiation({ status: "ok", session: { status: "closed" } }).status, "closed");
 });
+
+test("buyer: a late, cheaper seller is countered instead of settling on the deal in hand", () => {
+  const order: BuyOrder = {
+    targetCents: 30000,
+    budgetCents: 40000,
+    sessions: [
+      { sessionId: "bay", status: "open", turn: "buyer", version: 4, rounds: 2, offer: { offerId: "bay-o", totalCents: 37150 }, counter: { totalCents: 37150 } },
+      { sessionId: "late", status: "open", turn: "buyer", version: 1, rounds: 0, offer: { offerId: "late-o", totalCents: 31000 }, counter: null },
+    ],
+  };
+  const move = decideBuyer(order, "late");
+  assert.deepEqual([move.action, move.totalCents], ["counter", 30000]);
+  assert.equal(decideBuyer(order, "bay").action, "ready", "an event on the agreed session keeps the deal");
+  const pricier = { ...order, sessions: [order.sessions[0], { ...order.sessions[1], offer: { offerId: "late-o", totalCents: 39000 } }] };
+  assert.equal(decideBuyer(pricier, "late").action, "ready", "a pricier late offer does not reopen talks");
+});

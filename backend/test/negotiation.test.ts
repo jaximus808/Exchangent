@@ -120,3 +120,30 @@ test('opening total is the first recorded offer and only loaded after buyer acce
  const offers=await n.listOffers({scope:'buyer',actor_id:'buyer'},request);
  assert.equal(offers[0].opening_total_cents,46500);assert.equal(offers[0].delivery_days,2);
 });
+test('businesses: buyers register, owners edit, agent tokens only negotiate, the worker mints hashed seller tokens',async()=>{
+ const calls: {name: string; args?: Record<string, unknown>}[]=[];
+ const n=new Negotiation({db:{database:{rpc:async(name,args)=>{calls.push({name,args});
+  return {data:name==='commerce_mint_seller_agent_token'?{seller_id:args?.p_seller,name:'Desk Shop',expires_at:'t',agent_handle:null}
+   :{seller_id:'s',name:'Desk Shop'},error:null};}}}});
+ const buyer: RolePrincipal={scope:'buyer',actor_id:'b',label:'connector'},owner: RolePrincipal={scope:'seller',actor_id:'b',seller_id:'s',label:'connector'};
+ const agent: RolePrincipal={scope:'seller',actor_id:'b',seller_id:'s',label:'agents:seller-agent:s'},worker: RolePrincipal={scope:'worker',actor_id:'w'};
+ const r=await n.registerBusiness(buyer,{name:'Desk Shop',delivery_cents:1500});
+ assert.equal(r.business.name,'Desk Shop');assert.match(r.next,/choose Desk Shop/);
+ assert.deepEqual(calls[0].args,{p_actor:'b',p_name:'Desk Shop',p_service_area:null,p_delivery_cents:1500,p_delivery_days:null});
+ for(const p of [owner,worker,{scope:'buyer_agent',actor_id:'x'} as RolePrincipal]) await assert.rejects(n.registerBusiness(p,{name:'X Y'}),/forbidden/);
+ await assert.rejects(n.registerBusiness(buyer,{}),/invalid_input/);
+ await assert.rejects(n.registerBusiness(buyer,{name:'Shop',delivery_days:31}),/invalid_input/);
+ await n.updateBusiness(owner,{delegate_negotiation:false});await n.upsertInventory(owner,{title:'Desk'});
+ assert.deepEqual(calls.slice(-2).map(c=>c.name),['commerce_update_business','commerce_upsert_inventory']);
+ await assert.rejects(n.updateBusiness(agent,{}),(e: CommerceError)=>e.code==='forbidden'&&e.status===403);
+ await assert.rejects(n.upsertInventory(agent,{}),/forbidden/);await assert.rejects(n.updateBusiness(buyer,{}),/forbidden/);
+ assert.equal((await n.getBusiness(agent)).seller_id,'s');
+ await assert.rejects(n.mintSellerAgentToken(owner,'00000000-0000-4000-8000-000000000000',{}),/forbidden/);
+ await assert.rejects(n.mintSellerAgentToken(worker,'00000000-0000-4000-8000-000000000000',{hours:73}),/invalid_input/);
+ const minted=await n.mintSellerAgentToken(worker,'00000000-0000-4000-8000-000000000000',{});
+ assert.match(minted.token,/^[0-9a-f]{64}$/);
+ assert.deepEqual(calls.at(-1)?.args,{p_seller:'00000000-0000-4000-8000-000000000000',p_token_hash:hashToken(minted.token),p_hours:24});
+ assert.ok(!JSON.stringify(calls).includes(minted.token));
+ assert.equal(statusFor('not_delegated'),403);assert.equal(statusFor('business_name_taken'),409);assert.equal(statusFor('business_limit'),409);
+ for(const code of ['business_name_taken','business_limit','not_delegated']) assert.ok(NEXT_ACTIONS[code]);
+});

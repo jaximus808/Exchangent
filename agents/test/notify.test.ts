@@ -62,3 +62,21 @@ test("DealNotifier: emails once per order, skips buyers without email, never thr
   await n.afterTurn(buyer, { ...ev, payload: { session_id: "s2", request_id: "req-2" } }, ready);
   assert.equal(sent.length, 1, "no email on file");
 });
+
+test("DealNotifier: a different, later deal on the same order sends one 'better deal' email", async () => {
+  const sent: EmailMessage[] = [];
+  const transport = { async email(_from: unknown, m: EmailMessage) { sent.push(m); } } as unknown as Transport;
+  const LATE = "1b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e9";
+  const withLate = { ...order("me@example.com"), sessions: [...order("me@example.com").sessions, { session_id: "s3", seller_name: "Alex Woodworks", current_offer: { offer_id: LATE, total_cents: 30000 } }] };
+  const mcp = { async call() { return withLate; } } as unknown as McpToolClient;
+  const n = new DealNotifier({ transport, mcpFor: async () => mcp });
+  const buyer = buyerAgent({ actor_id: "a", token: "t", scope: "buyer_agent" });
+  const ev = { id: "e1", kind: "offer.created" as const, payload: { session_id: "s2", request_id: "req-1" } };
+  await n.afterTurn(buyer, ev, { action: "ready", offerId: OFFER } as never);
+  await n.afterTurn(buyer, ev, { action: "ready", offerId: LATE } as never);
+  await n.afterTurn(buyer, ev, { action: "ready", offerId: LATE } as never);
+  assert.deepEqual(sent.map((m) => [m.subject, m.idempotencyKey]), [
+    ["Deal reached: Bay Desk Co, $371.50", "exchangent-deal-req-1"],
+    ["Better deal: Alex Woodworks, $300.00", `exchangent-deal-req-1-${LATE}`],
+  ]);
+});

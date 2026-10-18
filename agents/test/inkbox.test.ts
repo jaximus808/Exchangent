@@ -388,11 +388,11 @@ test("receive: signed webhook -> mailbox once; duplicates, bad signatures and st
   await transport.close();
 });
 
-test("identity cap: clear error before calling Inkbox once the configured cap is reached", async () => {
+test("identity cap: ensureIdentity explains the cap without calling Inkbox; send falls back to in-process", async () => {
   const { transport, fake } = makeTransport({ cap: 2 });
   await transport.send(buyer, acme, opened("s-acme"));
   await assert.rejects(
-    () => transport.send(buyer, bay, opened("s-bay")),
+    () => transport.ensureIdentity(bay),
     (err) => {
       assert.ok(err instanceof IdentityCapError);
       assert.match(err.message, /identity cap reached \(2\/2: exchangent-buyer, exchangent-acme-desks\)/);
@@ -402,15 +402,55 @@ test("identity cap: clear error before calling Inkbox once the configured cap is
       return true;
     },
   );
+  // send() does not fail the event: Bay Office is delivered in-process, from the buyer agent.
+  const got: TransportMessage[] = [];
+  transport.onMessage(bay, (m) => got.push(m));
+  const ev = opened("s-bay");
+  await transport.send(buyer, bay, ev);
+  assert.deepEqual(got.map((m) => [m.id, m.from]), [[ev.id, "buyer"]]);
+  assert.equal(transport.isLocal(bay), true);
+  assert.equal(transport.hasMailbox(bay), false);
+  // ...and Bay's replies reach the buyer in-process too (no A2A from an identity Bay doesn't have).
+  const toBuyer: TransportMessage[] = [];
+  transport.onMessage(buyer, (m) => toBuyer.push(m));
+  const offer: WorkerEvent = { id: randomUUID(), kind: "offer.created", created_at: new Date().toISOString(), payload: { session_id: ev.payload.session_id!, offer_id: "o1", total_cents: 100 }, route: { to_role: "buyer", seller_id: "s-bay" } };
+  await transport.send(bay, buyer, offer);
+  assert.deepEqual(toBuyer.map((m) => [m.id, m.from]), [[offer.id, "seller:s-bay"]]);
   assert.equal(fake.calls.createIdentity.length, 2, "no third createIdentity call");
+  assert.equal(fake.org.sent.length, 1, "only the first event went over A2A");
   await transport.close();
 });
 
-test("identity cap: Inkbox 402 (plan limit) becomes an IdentityCapError", async () => {
+test("identity cap: Inkbox 402 (plan limit) falls back to in-process delivery", async () => {
   const { transport, fake } = makeTransport({ cap: 10, planLimit: 2 });
   await transport.send(buyer, acme, opened("s-acme"));
-  await assert.rejects(() => transport.send(buyer, bay, opened("s-bay")), (err) => err instanceof IdentityCapError && /HTTP 402/.test(err.message));
+  const got: string[] = [];
+  transport.onMessage(bay, (m) => got.push(m.id));
+  const ev = opened("s-bay");
+  await transport.send(buyer, bay, ev);
+  assert.deepEqual(got, [ev.id]);
   assert.equal(fake.calls.createIdentity.length, 3);
+  // Later events fail fast: no more createIdentity calls once Inkbox said 402.
+  await transport.send(buyer, bay, opened("s-bay"));
+  assert.equal(fake.calls.createIdentity.length, 3);
+  await assert.rejects(() => transport.ensureIdentity(bay), (err) => err instanceof IdentityCapError && /HTTP 402/.test(err.message));
+  await transport.close();
+});
+
+test("INKBOX_LOCAL_SELLERS: listed sellers never get an identity (by name or id, any case)", async () => {
+  const fake = makeFakeSdk({});
+  const stateDir = mkdtempSync(path.join(tmpdir(), "agents-inkbox-"));
+  const transport = new InkboxTransport({ apiKey: "admin-key", identityCap: 3, stateDir, localSellers: ["BAY OFFICE", "s-other"], backend: { registerSellerAgent: async () => {} }, sdk: fake.sdk });
+  const got: string[] = [];
+  transport.onMessage(bay, (m) => got.push(m.id));
+  const ev = opened("s-bay");
+  await transport.send(buyer, bay, ev);
+  assert.deepEqual(got, [ev.id]);
+  assert.deepEqual(fake.calls.createIdentity, ["exchangent-buyer"]);
+  assert.equal(transport.isLocal(bay), true);
+  assert.equal(transport.isLocal(acme), false);
+  assert.equal(transport.isLocal(buyer), false, "only sellers can be listed");
+  await assert.rejects(() => transport.email(bay, { to: ["o@example.com"], subject: "s", text: "t", html: "h", idempotencyKey: "k" }), IdentityCapError);
   await transport.close();
 });
 
@@ -442,7 +482,12 @@ test("no sender (a person's order): seller gets the event in-process, Inkbox is 
   assert.deepEqual(got, [ev.id]);
   assert.deepEqual(fake.calls.createIdentity, []);
   assert.equal(fake.org.sent.length, 0);
-  await assert.rejects(transport.send(null, buyer, ev), /cannot tell which seller/);
+  // A seller negotiating in chat (no seller agent) reaches the buyer agent in-process as well.
+  const toBuyer: string[] = [];
+  transport.onMessage(buyer, (m) => toBuyer.push(m.id));
+  await transport.send(null, buyer, ev);
+  assert.deepEqual(toBuyer, [ev.id]);
+  assert.equal(fake.org.sent.length, 0);
 });
 
 test("restart: tasks still submitted in the inbox are replayed to the agent and completed", async () => {

@@ -33,9 +33,14 @@ const routes: Route[]=[
  ['POST',/^\/api\/v1\/sessions\/([^/]+)\/decline$/,null,async c=>c.n.decline(c.p,c.m[1],c.key,await json(c.req))],
  ['GET',/^\/api\/v1\/seller\/sessions$/,null,c=>c.n.sellerSessions(c.p,c.url.searchParams.get('status'))],
  ['GET',/^\/api\/v1\/seller\/inventory$/,null,c=>c.n.sellerInventory(c.p)],
+ ['POST',/^\/api\/v1\/businesses$/,null,async c=>c.n.registerBusiness(c.p,await json(c.req))],
+ ['GET',/^\/api\/v1\/seller\/business$/,null,c=>c.n.getBusiness(c.p)],
+ ['PATCH',/^\/api\/v1\/seller\/business$/,null,async c=>c.n.updateBusiness(c.p,await json(c.req))],
+ ['POST',/^\/api\/v1\/seller\/inventory$/,null,async c=>c.n.upsertInventory(c.p,await json(c.req))],
  ['GET',/^\/api\/v1\/worker\/events$/,null,c=>c.n.workerEvents(c.p,c.url.searchParams.get('limit'))],
  ['POST',/^\/api\/v1\/worker\/events\/([^/]+)\/ack$/,null,c=>c.n.ackEvent(c.p,c.m[1])],
  ['POST',/^\/api\/v1\/worker\/sellers\/([^/]+)\/agent$/,null,async c=>c.n.setAgentHandle(c.p,c.m[1],await json(c.req))],
+ ['POST',/^\/api\/v1\/worker\/sellers\/([^/]+)\/token$/,null,async c=>c.n.mintSellerAgentToken(c.p,c.m[1],await json(c.req))],
  // Existing reservation and checkout routes: any buyer principal, unchanged behavior. Never the
  // buyer agent (buyer_agent scope): reserving and paying stay with the human buyer.
  ['POST',/^\/api\/v1\/offers\/([^/]+)\/reservations$/,'buyer',async c=>c.commerce.reserve(c.p.actor_id,id(c.m[1]),c.key,(await json(c.req)).expected_total_cents)],

@@ -66,6 +66,10 @@ data has its own `status` field, it's renamed so it doesn't clash with the envel
 | `get_inventory` | seller | `GET /seller/inventory` |
 | `make_offer` | seller | `POST /sessions/:id/offers` |
 | `decline_request` | seller | `POST /sessions/:id/decline` |
+| `register_business` | buyer (any signed-in person) | `POST /businesses`. Then reconnect and choose the new business |
+| `get_business` | seller | `GET /seller/business` |
+| `update_business` | seller (owner only) | `PATCH /seller/business`. `agent_negotiates` maps to `delegate_negotiation` |
+| `upsert_inventory_item` | seller (owner only) | `POST /seller/inventory`. Upserts by `sku` |
 | `whoami` | either | bearer mode: `GET /me`. oauth mode: the signed-in grant, with no backend call |
 
 `whoami` returns `auth_mode` (`bearer` or `oauth`). In oauth mode it also returns `actor_id`,

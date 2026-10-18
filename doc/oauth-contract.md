@@ -114,6 +114,11 @@ tokens keep working for the autonomous agent runner.
   Store those as Manufact environment variables, never in git.
 - `npm run assign:seller --prefix backend -- --email <person> --seller "Bay Desk Co"` makes a signed-up
   person the owner of a demo business, so it appears on their consent screen.
+- Self-serve sign-up (doc/signup-contract.md): any email signs in with a code, which creates the account.
+  The consent screen offers **Buyer account**, each business the person owns, and **Create a business**
+  (name, optional delivery fee and days). Create calls `POST /api/v1/businesses` with the person's InsForge
+  session, then authorizes `seller:<new id>`. A person connected as a buyer can also call the
+  `register_business` MCP tool, then reconnect and choose the new business.
 
 ## Backend implementation notes
 

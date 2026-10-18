@@ -213,7 +213,8 @@ test('full negotiation loop through HTTP on real Postgres',async t=>{
   const mine=events.filter(e=>e.route.request_id===request.request_id);
   assert.deepEqual(mine.map(e=>e.kind),['session.opened','session.opened','offer.created','counter.created','offer.created','session.declined']);
   const shapes: Record<WorkerEvent['kind'],string[]>={'session.opened':['request_id','session_id'],'offer.created':['note','offer_id','request_id','session_id','total_cents'],
-   'counter.created':['counter_id','note','session_id','total_cents'],'session.declined':['session_id']};
+   'counter.created':['counter_id','note','session_id','total_cents'],'session.declined':['session_id'],
+   'order.confirmed':['currency','order_id','request_id','reservation_id','seller_id','title','total_cents']};
   for(const e of events) assert.deepEqual(Object.keys(e.payload).sort(),shapes[e.kind],e.kind);
   const [{bad}]=await sql<{bad: number}>(`SELECT count(*)::int AS bad FROM commerce_outbox WHERE payload::text ~ '(budget|target|floor)'`);
   assert.equal(bad,0);
@@ -257,7 +258,7 @@ test('buyer decline routes to the seller and blocks reserving that seller offer'
  err(await call('POST',`/offers/${o.offer_id}/reservations`,P.buyer.token,undefined,randomUUID()),'budget_exceeded');
  ok(await call('POST',`/sessions/${s}/decline`,P.buyer.token,{reason:'Over budget'},randomUUID()));
  err(await call('POST',`/sessions/${s}/counters`,P.buyer.token,{expected_version:2,total_cents:38000},randomUUID()),'session_closed',409);
- const events=ok<WorkerEvent[]>(await call('GET','/worker/events?limit=100',P.worker.token)).filter(e=>e.payload.session_id===s);
+ const events=ok<WorkerEvent[]>(await call('GET','/worker/events?limit=100',P.worker.token)).filter(e=>'session_id' in e.payload&&e.payload.session_id===s);
  assert.deepEqual(events.map(e=>[e.kind,e.route.to_role]),[['session.opened','seller'],['offer.created','buyer'],['session.declined','seller']]);
  const offers=ok<CurrentOffer[]>(await call('GET',`/buy-requests/${r.request_id}/offers`,P.buyer.token));
  assert.ok(!offers.some(x=>x.offer_id===o.offer_id));

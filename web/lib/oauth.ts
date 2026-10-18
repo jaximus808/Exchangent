@@ -93,6 +93,32 @@ export function parseTarget(value:unknown):ConsentTarget|null {
  return null;
 }
 
+/** Body for POST /api/v1/businesses (doc/signup-contract.md), parsed from the "Create a business" fields. */
+export type NewBusiness={name:string;delivery_cents?:number;delivery_days?:number};
+
+/**
+ * Reads the consent form's new-business fields: a required name (2-80 characters), an optional
+ * delivery fee in dollars (0-1000, converted to integer cents) and optional delivery days (0-30).
+ * The backend re-validates everything.
+ */
+export function parseNewBusiness(form:FormData):{ok:true;body:NewBusiness}|{ok:false;error:string} {
+ const text=(key:string)=>{const v=form.get(key);return typeof v==='string'?v.trim():'';};
+ const name=text('business_name').replace(/\s+/g,' ');
+ if(name.length<2||name.length>80) return {ok:false,error:'Enter a business name between 2 and 80 characters.'};
+ const body:NewBusiness={name};
+ const fee=text('delivery_fee').replace(/^\$/,'');
+ if(fee) {
+  if(!/^\d{1,4}(\.\d{1,2})?$/.test(fee)||Number(fee)>1000) return {ok:false,error:'Enter a delivery fee in dollars, from 0 to 1000.'};
+  body.delivery_cents=Math.round(Number(fee)*100);
+ }
+ const days=text('delivery_days');
+ if(days) {
+  if(!/^\d{1,2}$/.test(days)||Number(days)>30) return {ok:false,error:'Enter delivery days as a whole number from 0 to 30.'};
+  body.delivery_days=Number(days);
+ }
+ return {ok:true,body};
+}
+
 export function denyRedirectUrl(params:AuthorizeParams):string {
  const url=new URL(params.redirect_uri);
  url.searchParams.set('error','access_denied');

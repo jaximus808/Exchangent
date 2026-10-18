@@ -45,6 +45,8 @@ export interface Transport {
   onMessage(agent: Agent, handler: MessageHandler): void;
   /** Email a human from this agent (Inkbox: the identity's own mailbox; local: logged, not sent). */
   email(from: Agent, message: EmailMessage): Promise<void>;
+  /** False when this agent has no mailbox here (Inkbox: no identity); the caller sends from another agent. */
+  hasMailbox?(agent: Agent): boolean;
   close(): Promise<void>;
 }
 
@@ -52,7 +54,7 @@ export interface Transport {
 export function publicPayload(payload: Record<string, unknown> = {}): PublicPayload {
   const out: Record<string, unknown> = {};
   for (const k of PUBLIC_PAYLOAD_KEYS) if (payload[k] !== undefined && payload[k] !== null) out[k] = payload[k];
-  // Values are copied as received; every outbox payload carries session_id (backend contract).
+  // Values are copied as received; every negotiation event payload carries session_id (backend contract).
   return out as PublicPayload;
 }
 
