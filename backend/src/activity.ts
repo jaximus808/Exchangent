@@ -1,7 +1,11 @@
 import {CommerceError} from './commerce.ts';
 import type {Commerce} from './commerce.ts';
 import {authorize,requireUser,UUID} from './auth.ts';
-import type {Db, DelegationScope, OfferItemRow, OfferRow, Principal, RequestRow, ReservationRow, Row, SellerRow} from './types.ts';
+import {buyerView,dbError,sellerView} from './negotiation.ts';
+import type {
+  BusinessJson, BusinessSession, BuyerRequestSummary, Conversation, Db, DelegationScope, InventoryItem, OfferItemRow, OfferRow,
+  OwnedBusiness, Principal, RequestRow, ReservationRow, Row, SellerRow,
+} from './types.ts';
 
 export type RequestSummary = Pick<RequestRow,'id'|'requirements'|'status'|'currency'|'created_at'>;
 export interface OfferSummary extends Pick<OfferRow,'id'|'seller_id'|'version'|'delivery_cents'|'tax_cents'|'expires_at'|'is_current'> {
@@ -10,13 +14,46 @@ export interface OfferSummary extends Pick<OfferRow,'id'|'seller_id'|'version'|'
 export class Activity {
   commerce: Commerce; db: Db;
   constructor(commerce: Commerce) {this.commerce=commerce;this.db=commerce.db;}
+  /** SQL functions raise snake_case codes; map them to their HTTP status (invalid_input 400, forbidden 403...). */
+  async rpc<T>(name: string,args: Record<string, unknown>): Promise<T> {
+    const {data,error}=await this.db.database.rpc(name,args);
+    if(error) throw dbError(error);
+    return data as T;
+  }
+  /** The dashboard's list: the original summary fields plus title, sellers, best current offer and any hold. */
   async requests(principal: Principal) {
     requireUser(principal);
-    const {data,error}=await this.db.database.from('commerce_requests')
-      .select('id,requirements,status,currency,created_at').eq('buyer_id',principal.actorId)
-      .order('created_at',{ascending:false}).limit(50);
-    if(error) throw new CommerceError('database_error',503);
-    return (data??[]) as RequestSummary[];
+    return this.rpc<BuyerRequestSummary[]>('commerce_buyer_requests',{p_buyer:principal.actorId});
+  }
+  /** The live web view (doc/conversation-contract.md): every seller's moves on the buyer's own request. */
+  async conversation(principal: Principal,id: string) {
+    await this.request(principal,id);
+    return buyerView(await this.rpc<Conversation>('commerce_conversation',{p_request:id}));
+  }
+  // Businesses the signed-in person owns (web dashboard). The SQL functions re-check every field.
+  async businesses(principal: Principal) {
+    requireUser(principal);
+    return this.rpc<OwnedBusiness[]>('commerce_actor_businesses',{p_actor:principal.actorId});
+  }
+  async ownBusiness(principal: Principal,id: string) {
+    requireUser(principal);
+    if(!UUID.test(id)) throw new CommerceError('invalid_id',400);
+    const seller=await this.commerce.row<SellerRow>('commerce_sellers',id);
+    if(seller.owner_id!==principal.actorId) throw new CommerceError('forbidden',403);
+    return seller;
+  }
+  /** One business's negotiations with their moves; never another seller's, never the buyer's budget. */
+  async businessSessions(principal: Principal,id: string) {
+    await this.ownBusiness(principal,id);
+    return sellerView(await this.rpc<BusinessSession[]>('commerce_business_sessions',{p_seller:id}));
+  }
+  async updateBusiness(principal: Principal,id: string,input: Record<string, unknown>) {
+    await this.ownBusiness(principal,id);
+    return this.rpc<BusinessJson>('commerce_update_business',{p_seller:id,p_patch:input});
+  }
+  async upsertInventory(principal: Principal,id: string,input: Record<string, unknown>) {
+    await this.ownBusiness(principal,id);
+    return this.rpc<InventoryItem>('commerce_upsert_inventory',{p_seller:id,p_item:input});
   }
   async createRequest(principal: Principal,input: Record<string, unknown>,key: unknown) {
     requireUser(principal);

@@ -203,4 +203,43 @@ export type WorkerEvent = { [K in OutboxKind]: {
   seller_delegated: boolean };
 } }[OutboxKind];
 export interface EventAck { id: string; kind: OutboxKind; delivered_at: string }
+
+// ---------- Conversation (doc/conversation-contract.md) ----------
+/** How the runner delivered an outbox event: an Inkbox A2A message between two identities, or in-process. */
+export interface DeliveryReceipt {
+ transport?: 'inkbox' | 'local'; from_handle?: string; to_handle?: string; message_id?: string; context_id?: string; delivered_at?: string;
+}
+/** One move in a negotiation. Optional fields are absent (never null) when unknown. */
+export interface ConversationMessage {
+ kind: 'opened' | 'offer' | 'counter' | 'declined'; by: 'buyer' | 'seller' | 'platform';
+ total_cents?: number; note?: string; reason?: string; version?: number; offer_id?: string; counter_id?: string;
+ at: string; delivery?: DeliveryReceipt;
+}
+export interface SessionConversation {
+ session_id: string; request_id: string; seller_id: string; seller_name: string; status: SessionStatus; turn: Turn; rounds: number;
+ /** The seller's delegate_negotiation: its platform seller agent negotiates. */
+ seller_agent: boolean; seller_handle: string | null; opened_at: string;
+ current_offer: { offer_id: string; total_cents: number; expires_at: string } | null;
+ messages: ConversationMessage[];
+}
+export interface Conversation {
+ request_id: string; title: string | null; status: RequestStatus; delegate_negotiation: boolean; created_at: string;
+ sessions: SessionConversation[];
+ best_offer: { session_id: string; seller_name: string; offer_id: string; total_cents: number } | null;
+ reservation: { reservation_id: string; offer_id: string; seller_id: string; status: string; total_cents: number } | null;
+}
+/** A business's negotiation for its owner, with a request summary (no budget, target or buyer). */
+export interface BusinessSession extends SessionConversation {
+ request: { request_id: string; title: string | null; status: RequestStatus; requirements: Requirements; deadline: string | null; created_at: string };
+}
+/** GET /api/v1/businesses (user session): each business the person owns, with stock and sales. */
+export interface OwnedBusiness extends BusinessJson { inventory: InventoryItem[]; open_sessions: number; orders: number; sales_cents: number }
+/** GET /api/v1/buy-requests (user session): the dashboard's request list. */
+export interface BuyerRequestSummary {
+ id: string; request_id: string; title: string | null; requirements: string; structured_requirements: Requirements;
+ status: RequestStatus; currency: string; created_at: string; budget_cents: number; target_cents: number | null;
+ delegate_negotiation: boolean; seller_count: number; open_sessions: number;
+ best_offer: { offer_id: string; seller_name: string; total_cents: number } | null;
+ reservation: { reservation_id: string; offer_id: string; status: string; total_cents: number } | null;
+}
 export interface AgentHandle { seller_id: string; agent_handle: string }

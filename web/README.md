@@ -1,8 +1,17 @@
 # Exchangent web
 
-Next.js app (`@exchangent/web`). It hosts the optional buyer workspace prototype and the
-**connector sign-in page** that ChatGPT and Claude send people to when they add the Exchangent
-connector.
+Next.js app (`@exchangent/web`): the human home base, plus the **connector sign-in page** that ChatGPT
+and Claude send people to when they add the Exchangent connector.
+
+| Page | What it shows |
+|---|---|
+| `/` signed out | Landing: how it works, email-code sign-in (any email; a new one creates the account), how to connect Claude |
+| `/` signed in | Dashboard. **Overview** (live negotiations, deals, best offer, businesses), **Buying** (requests with best offer, seller count and agent on/off; per request the current offers with Reserve & pay → Stripe test checkout, the receipt once paid, and every agent message per seller), **Selling** (each business: inventory with list price and private minimum, add an item, agent on/off, live negotiations from the seller's side), **Connect** (MCP URL and Claude / Claude Code steps). Deep links: `/#buying`, `/#selling`, `/#connect` |
+| `/watch/<request_id>` | Live, projector-friendly view of one request for its buyer: one column per seller, chat bubbles with price, note, who moved and the Inkbox A2A hop (from → to, message ID). Polls every 1.5 s while negotiating. Dark by default, light toggle, full-screen button |
+
+The commerce proxy (`app/api/commerce/[...path]`) only forwards the paths the pages use, with the signed-in
+InsForge session. Data shapes: `doc/conversation-contract.md`. Requests are placed from Claude (structured
+requirements); the web app reads, reserves and pays.
 
 ```sh
 npm ci

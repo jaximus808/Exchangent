@@ -147,3 +147,41 @@ test('businesses: buyers register, owners edit, agent tokens only negotiate, the
  assert.equal(statusFor('not_delegated'),403);assert.equal(statusFor('business_name_taken'),409);assert.equal(statusFor('business_limit'),409);
  for(const code of ['business_name_taken','business_limit','not_delegated']) assert.ok(NEXT_ACTIONS[code]);
 });
+test('ack: optional delivery receipt; a missing two-argument ack (migration not applied) falls back to the plain ack',async()=>{
+ const event='00000000-0000-4000-8000-000000000009';
+ const calls:{name:string;args:Record<string,unknown>}[]=[];
+ let upgraded=false;
+ const n=new Negotiation({db:{database:{rpc:async(name,args={})=>{
+  calls.push({name,args});
+  if('p_delivery' in args&&!upgraded) return {data:null,error:{message:'Could not find the function public.commerce_ack_event(p_delivery, p_event)'}};
+  return {data:{id:event,kind:'offer.created',delivered_at:'t'},error:null};
+ }}}});
+ const worker={scope:'worker' as const,actor_id:'w'};
+ await n.ackEvent(worker,event);
+ await n.ackEvent(worker,event,{});
+ await n.ackEvent(worker,event,{delivery:null});
+ assert.deepEqual(calls.map(c=>Object.keys(c.args)),[['p_event'],['p_event'],['p_event']]);
+ calls.length=0;
+ await n.ackEvent(worker,event,{delivery:{transport:'inkbox',message_id:event}});
+ assert.deepEqual(calls.map(c=>Object.keys(c.args).sort()),[['p_delivery','p_event'],['p_event']],'falls back once');
+ calls.length=0;upgraded=true;
+ await n.ackEvent(worker,event,{delivery:{transport:'inkbox'}});
+ assert.deepEqual(calls.map(c=>Object.keys(c.args).sort()),[['p_delivery','p_event']]);
+ for(const delivery of ['inkbox',[1],5]) await assert.rejects(n.ackEvent(worker,event,{delivery}),/invalid_input/);
+ await assert.rejects(n.ackEvent({scope:'seller',actor_id:'s',seller_id:'x'},event,{}),/forbidden/);
+});
+test('conversation access: buyers read their own request, sellers only their own session',async()=>{
+ const request='00000000-0000-4000-8000-000000000002',session='00000000-0000-4000-8000-000000000003';
+ const n=new Negotiation({db:{database:{rpc:async(name)=>({error:null,data:
+  name==='commerce_request_state'?{request_id:request,buyer_id:'buyer',delegate_negotiation:true,sessions:[]}
+  :name==='commerce_session_conversation'?{session_id:session,seller_id:'bay',messages:[]}
+  :{request_id:request,sessions:[{seller_handle:'exchangent-bay',messages:[{kind:'offer',total_cents:1,floor_cents:2}]}]}})}}});
+ const c=await n.conversation({scope:'buyer',actor_id:'buyer'},request) as unknown as {sessions:{seller_handle:string;messages:object[]}[]};
+ assert.equal(c.sessions[0].seller_handle,'exchangent-bay');
+ assert.ok(!JSON.stringify(c).includes('floor_cents'),'buyer view strips floors at any depth');
+ await assert.rejects(n.conversation({scope:'buyer',actor_id:'other'},request),/forbidden/);
+ await assert.rejects(n.conversation({scope:'seller',actor_id:'s',seller_id:'bay'},request),/forbidden/);
+ assert.equal((await n.sellerConversation({scope:'seller',actor_id:'s',seller_id:'bay'},session)).session_id,session);
+ await assert.rejects(n.sellerConversation({scope:'seller',actor_id:'s',seller_id:'mission'},session),/forbidden/);
+ await assert.rejects(n.sellerConversation({scope:'buyer',actor_id:'buyer'},session),/forbidden/);
+});

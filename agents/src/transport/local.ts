@@ -1,5 +1,5 @@
-import { toMessage } from "./index.ts";
-import type { MessageHandler, Transport } from "./index.ts";
+import { localReceipt, toMessage } from "./index.ts";
+import type { DeliveryReceipt, MessageHandler, Transport } from "./index.ts";
 import type { Agent } from "../agents.ts";
 import type { WorkerEvent } from "../backend.ts";
 import type { EmailMessage } from "../notify.ts";
@@ -18,12 +18,13 @@ export class LocalTransport implements Transport {
 
   async start(): Promise<void> {}
 
-  async send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<void> {
+  async send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<DeliveryReceipt> {
     const handler = this.#handlers.get(toAgent.id);
     if (!handler) throw new Error(`no local receiver for ${toAgent.id}`);
     const msg = toMessage(fromAgent, event);
     log.info("delivered", { from: fromAgent?.id, to: toAgent.id, kind: event.kind, event: event.id });
     await handler(msg);
+    return localReceipt(fromAgent, toAgent, event);
   }
 
   async email(from: Agent, message: EmailMessage): Promise<void> {

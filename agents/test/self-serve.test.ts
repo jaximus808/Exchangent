@@ -10,6 +10,7 @@ import { Dispatcher } from "../src/dispatcher.ts";
 import { SaleNotifier, businessFromResult, saleEmail } from "../src/notify.ts";
 import type { EmailMessage } from "../src/notify.ts";
 import type { McpToolClient } from "../src/mcp.ts";
+import { localReceipt } from "../src/transport/index.ts";
 import type { MessageHandler, Transport } from "../src/transport/index.ts";
 
 process.env.LOG_SILENT ??= "1";
@@ -37,6 +38,7 @@ function setup(events: WorkerEvent[], mint: (id: string) => Promise<SellerAgentT
     onMessage(_agent: Agent, _handler: MessageHandler) {},
     async send(from, to, event) {
       sent.push({ from: from?.id ?? null, to: to.id, id: event.id, token: to.token });
+      return localReceipt(from, to, event);
     },
     async email() {},
     async close() {},

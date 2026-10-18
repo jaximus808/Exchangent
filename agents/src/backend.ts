@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { DeliveryReceipt } from "./transport/index.ts";
 
 /** Negotiation event kinds (doc/negotiation-contract.md, "Worker scope"): each one is a brain turn. */
 export type NegotiationKind = "session.opened" | "offer.created" | "counter.created" | "session.declined";
@@ -124,8 +125,9 @@ export class WorkerApi {
     return [];
   }
 
-  async ack(eventId: string): Promise<unknown> {
-    return this.#request("POST", `/worker/events/${encodeURIComponent(eventId)}/ack`, {}, { idempotencyKey: `ack-${eventId}` });
+  /** Ack one event. A delivery receipt (doc/conversation-contract.md) is stored for the conversation views. */
+  async ack(eventId: string, delivery?: DeliveryReceipt): Promise<unknown> {
+    return this.#request("POST", `/worker/events/${encodeURIComponent(eventId)}/ack`, delivery ? { delivery } : {}, { idempotencyKey: `ack-${eventId}` });
   }
 
   /** Mint a seller token for a business whose owner delegated negotiation (403 not_delegated otherwise). */

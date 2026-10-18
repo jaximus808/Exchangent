@@ -1,9 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { CommerceError } from './commerce.ts';
 import type {
- AgentHandle, ApiError, BusinessJson, CreatedCounter, CreatedOffer, CreatedRequest, DbError, DeclinedSession, DelegatedBuyer, DelegatedBuyerEmail, ErrorCode, EventAck,
+ AgentHandle, ApiError, BusinessJson, Conversation, CreatedCounter, CreatedOffer, CreatedRequest, DbError, DeclinedSession, DelegatedBuyer, DelegatedBuyerEmail, ErrorCode, EventAck,
  InventoryItem, OfferJson, Requirements, RequestState, RoleScope, RolePrincipal, RpcDb, SellerSession, SessionJson,
- RegisteredBusiness, SellerAgentToken, SessionState, WorkerEvent,
+ RegisteredBusiness, SellerAgentToken, SessionConversation, SessionState, WorkerEvent,
 } from './types.ts';
 
 const STATUS: Partial<Record<ErrorCode,number>>={unauthorized:401,forbidden:403,not_found:404,session_not_found:404,request_not_found:404,
@@ -221,6 +221,11 @@ export class Negotiation {
    turn:s.turn,session_version:s.version,rounds:s.rounds,opening_total_cents:s.opening_total_cents,within_budget:s.current_offer.total_cents<=state.budget_cents}))
    .sort((a,b)=>a.total_cents-b.total_cents));
  }
+ /** The request's conversation (doc/conversation-contract.md): every seller's moves and how each was delivered. */
+ async conversation(p: RolePrincipal,requestId: unknown) {
+  const state=await this.requestState(p,requestId);
+  return buyerView(await this.rpc<Conversation>('commerce_conversation',{p_request:state.request_id}));
+ }
  // Authorized request reads only. Use the first recorded offer, never today's list
  // price, as the starting total. Do not expose the raw history or private floors.
  async openingTotals(state: RequestState): Promise<RequestState> {
@@ -269,6 +274,14 @@ export class Negotiation {
   if(status!=null&&!['open','declined','closed'].includes(status)) throw fail('invalid_input','status must be open, declined or closed');
   return sellerView(await this.rpc<SellerSession[]>('commerce_seller_sessions',{p_seller:p.seller_id,p_status:status??null}));
  }
+ /** One of the seller's own sessions as a conversation; never another seller's. */
+ async sellerConversation(p: RolePrincipal,sessionId: unknown) {
+  this.need(p,'seller');
+  const c=await this.rpc<SessionConversation | null>('commerce_session_conversation',{p_session:id(sessionId)});
+  if(!c) throw fail('session_not_found');
+  if(c.seller_id!==p.seller_id) throw fail('forbidden');
+  return sellerView(c);
+ }
  async sellerInventory(p: RolePrincipal) {
   this.need(p,'seller');
   return sellerView(await this.rpc<InventoryItem[]>('commerce_seller_inventory',{p_seller:p.seller_id}));
@@ -294,9 +307,18 @@ export class Negotiation {
   if(!Number.isInteger(n)||n<1||n>100) throw fail('invalid_input','limit must be an integer between 1 and 100');
   return this.rpc<WorkerEvent[]>('commerce_worker_events',{p_limit:n});
  }
- async ackEvent(p: RolePrincipal,eventId: unknown) {
+ /** Ack, optionally with how the runner delivered the event (an Inkbox A2A receipt). The SQL keeps allowlisted keys only. */
+ async ackEvent(p: RolePrincipal,eventId: unknown,body?: unknown) {
   this.need(p,'worker');
-  return this.rpc<EventAck>('commerce_ack_event',{p_event:id(eventId)});
+  const event=id(eventId),delivery=object(body).delivery;
+  if(delivery==null) return this.rpc<EventAck>('commerce_ack_event',{p_event:event});
+  if(!isObject(delivery)||Array.isArray(delivery)) throw fail('invalid_input','delivery must be an object');
+  try {return await this.rpc<EventAck>('commerce_ack_event',{p_event:event,p_delivery:delivery});}
+  catch(e) {
+   // Before the conversation migration the one-argument ack is all there is: never let a receipt block an ack.
+   if(e instanceof CommerceError&&e.code==='database_error') return this.rpc<EventAck>('commerce_ack_event',{p_event:event});
+   throw e;
+  }
  }
  async setAgentHandle(p: RolePrincipal,sellerId: unknown,body: unknown) {
   this.need(p,'worker');

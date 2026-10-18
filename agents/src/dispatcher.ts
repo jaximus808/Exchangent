@@ -1,7 +1,7 @@
-import { logger, short } from "./log.ts";
+import { logger, money, short } from "./log.ts";
 import type { Agent, AgentRegistry, SellerAgent } from "./agents.ts";
 import type { WorkerApi, WorkerEvent } from "./backend.ts";
-import type { Transport } from "./transport/index.ts";
+import type { DeliveryReceipt, Transport } from "./transport/index.ts";
 
 const log = logger("dispatcher");
 
@@ -146,8 +146,9 @@ export class Dispatcher {
           total_cents: event.payload?.total_cents,
           event: event.id,
         });
-        await this.transport.send(from, to, event);
-        await this.api.ack(event.id);
+        const receipt = await this.transport.send(from, to, event);
+        await this.api.ack(event.id, receipt);
+        transcript(from, to, event, receipt);
         this.lastError.delete(event.id);
         delivered++;
       } catch (err) {
@@ -195,4 +196,31 @@ export class Dispatcher {
     this.stopped = true;
     clearTimeout(this.timer ?? undefined);
   }
+}
+
+const SAID = new Set(["offer.created", "counter.created", "session.declined"]);
+
+/** Who moved, for the transcript: an agent, or a person negotiating in chat (no sender agent). */
+function speaker(agent: Agent | null, other: Agent): string {
+  if (agent) return agent.role === "seller" ? `${agent.name} agent` : agent.name;
+  return other.role === "buyer" ? "Seller (in chat)" : "Buyer (in chat)";
+}
+
+/**
+ * One readable line per delivered offer, counter or decline, for the terminal:
+ *   💬 Alex Woodworks agent → Buyer agent: $300.00 "Deal at $300." [inkbox exchangent-alex-woodworks → exchangent-buyer]
+ * Total and note come from the event payload only (no extra reads).
+ */
+export function transcriptLine(from: Agent | null, to: Agent, event: WorkerEvent, receipt?: DeliveryReceipt): string | null {
+  if (!SAID.has(event.kind)) return null;
+  const p = event.payload ?? {};
+  const what = event.kind === "session.declined" ? "declined" : typeof p.total_cents === "number" ? money(p.total_cents) : event.kind;
+  const note = typeof p.note === "string" && p.note.trim() ? ` "${p.note.trim()}"` : "";
+  const hop = receipt ? ` [${receipt.transport}${receipt.from_handle ? ` ${receipt.from_handle}` : ""} → ${receipt.to_handle ?? to.slug}]` : "";
+  return `💬 ${speaker(from, to)} → ${speaker(to, to)}: ${what}${note}${hop}`;
+}
+
+function transcript(from: Agent | null, to: Agent, event: WorkerEvent, receipt: DeliveryReceipt): void {
+  const line = transcriptLine(from, to, event, receipt);
+  if (line) console.log(line);
 }

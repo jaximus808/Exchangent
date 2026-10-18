@@ -72,6 +72,13 @@ export function createApp({commerce,auth,activity=new Activity(commerce),negotia
         requireUser(principal);
         return send(201,{data:await negotiation.registerBusinessFor(principal.actorId,await json(req))});
       }
+      if(req.method==='GET'&&path==='/api/v1/businesses') return send(200,{data:await activity.businesses(principal)});
+      const business=path.match(/^\/api\/v1\/businesses\/([^/]+)(?:\/(sessions|inventory))?$/);
+      if(business) {
+        if(req.method==='GET'&&business[2]==='sessions') return send(200,{data:await activity.businessSessions(principal,business[1])});
+        if(req.method==='POST'&&business[2]==='inventory') return send(200,{data:await activity.upsertInventory(principal,business[1],await json(req))});
+        if(req.method==='PATCH'&&!business[2]) return send(200,{data:await activity.updateBusiness(principal,business[1],await json(req))});
+      }
       if(req.method==='POST'&&path==='/api/v1/buy-requests')
         return send(200,{data:await activity.createRequest(principal,await json(req),req.headers['idempotency-key'])});
       if(req.method==='GET'&&path==='/api/v1/buy-requests')
@@ -80,8 +87,8 @@ export function createApp({commerce,auth,activity=new Activity(commerce),negotia
         return send(201,{data:await auth.createDelegation(principal,await json(req))});
       let match=path.match(/^\/api\/v1\/delegations\/([^/]+)$/);
       if(match&&req.method==='DELETE') return send(200,{data:await auth.revoke(principal,match[1])});
-      match=path.match(/^\/api\/v1\/buy-requests\/([^/]+)(\/offers)?$/);
-      if(match&&req.method==='GET') return send(200,{data:await activity[match[2]?'offers':'request'](principal,match[1])});
+      match=path.match(/^\/api\/v1\/buy-requests\/([^/]+)(\/offers|\/conversation)?$/);
+      if(match&&req.method==='GET') return send(200,{data:await activity[match[2]==='/offers'?'offers':match[2]?'conversation':'request'](principal,match[1])});
       match=path.match(/^\/api\/v1\/sellers\/([^/]+)\/activity$/);
       if(match&&req.method==='GET') return send(200,{data:await activity.seller(principal,match[1])});
       match=path.match(/^\/api\/v1\/offers\/([^/]+)\/reservations$/);

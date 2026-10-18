@@ -6,7 +6,7 @@
  */
 import type { MCPServer } from "mcp-use";
 import { z } from "zod";
-import { callBackend, deriveIdempotencyKey, errorResult, okResult, runTool, shapeData, type CallContext, type HintContext } from "./adapter.ts";
+import { callBackend, deriveIdempotencyKey, errorResult, okResult, runTool, shapeData, type CallContext, type ExchangentResult, type HintContext } from "./adapter.ts";
 import { authMode, type ExchangentUser } from "./auth.ts";
 
 const id = (what: string) => z.string().min(1).describe(`The ${what} ID (UUID) returned by an earlier Exchangent tool.`);
@@ -34,13 +34,29 @@ const BUYER: HintContext = { role: "buyer", reread: "get_buy_order" };
 const SELLER: HintContext = { role: "seller", reread: "get_negotiation" };
 const WHOAMI: HintContext = { role: "buyer", reread: "whoami" };
 
-const BUYER_NEXT = "This connection acts for a buyer: use create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link and get_reservation_status. To sell as well, call register_business, then reconnect and choose that business.";
+const BUYER_NEXT = "This connection acts for a buyer: use create_buy_order, get_buy_order, get_conversation, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link and get_reservation_status. To sell as well, call register_business, then reconnect and choose that business.";
 const sellerNext = (sellerId: unknown) =>
   `This connection acts for business ${String(sellerId)}: use get_business, update_business, upsert_inventory_item, get_inventory, list_my_requests, get_negotiation, make_offer and decline_request.`;
 const BUSINESS: HintContext = { role: "seller", reread: "get_business" };
 const REGISTER: HintContext = { role: "buyer", reread: "whoami" };
 
 const seg = (value: string) => encodeURIComponent(value);
+/** Live "watch the agents" page on the Exchangent web app (`EXCHANGENT_WEB_URL`). */
+export const DEFAULT_WEB_URL = "https://web-five-jet-34.vercel.app";
+export function watchUrl(requestId: unknown): string | undefined {
+  if (typeof requestId !== "string" || !requestId) return undefined;
+  const base = (process.env.EXCHANGENT_WEB_URL?.trim() || DEFAULT_WEB_URL).replace(/\/+$/, "");
+  return `${base}/watch/${encodeURIComponent(requestId)}`;
+}
+/** runTool, then add `watch_url` for the request on success. */
+async function withWatch(result: Promise<ExchangentResult>): Promise<ExchangentResult> {
+  const r = await result;
+  const sc = r.structuredContent;
+  const url = sc.status === "ok" ? watchUrl(sc.request_id) : undefined;
+  if (!url) return r;
+  const { next, ...rest } = sc;
+  return okResult({ ...rest, watch_url: url }, next);
+}
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 const mutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 
@@ -87,13 +103,13 @@ export function registerTools(server: MCPServer) {
     },
     async (input, ctx) => {
       const { idempotency_key, ...body } = input;
-      return runTool(
+      return withWatch(runTool(
         ctx as CallContext,
         { method: "POST", path: "/buy-requests", body, idempotencyKey: idempotency_key ?? deriveIdempotencyKey("create_buy_order", undefined, undefined, body) },
         BUYER,
         { statusKey: "request_status" },
-        (d) => `Buy order ${d.request_id ?? ""} is open with ${Array.isArray(d.sessions) ? d.sessions.length : 0} seller session(s); call list_offers or get_buy_order later to see seller offers.`,
-      );
+        (d) => `Buy order ${d.request_id ?? ""} is open with ${Array.isArray(d.sessions) ? d.sessions.length : 0} seller session(s); call get_conversation to watch the agents negotiate (or share watch_url for the live page), and list_offers or get_buy_order later to see seller offers.`,
+      ));
     },
   );
 
@@ -109,9 +125,30 @@ export function registerTools(server: MCPServer) {
       annotations: readOnly,
     },
     async ({ request_id }, ctx) =>
-      runTool(ctx as CallContext, { method: "GET", path: `/buy-requests/${seg(request_id)}` }, BUYER, { statusKey: "request_status" }, () =>
-        "For sessions where turn is \"buyer\", either reserve_offer on an acceptable current offer, counter_offer with that session's version, or decline_seller; otherwise wait for sellers.",
-      ),
+      withWatch(runTool(ctx as CallContext, { method: "GET", path: `/buy-requests/${seg(request_id)}` }, BUYER, { statusKey: "request_status" }, () =>
+        "For sessions where turn is \"buyer\", either reserve_offer on an acceptable current offer, counter_offer with that session's version, or decline_seller; otherwise wait for sellers. Call get_conversation to show how the agents negotiated (watch_url is the live page).",
+      )),
+  );
+
+  const get_conversation=server.tool(
+    {
+      name: "get_conversation",
+      title: "Watch the agents negotiate",
+      description:
+        "Buyer: open a live chat view of how the agents negotiated one of your buy orders — one thread per seller with every opening, offer, counter and decline in order, who made it (your agent or you, the seller's agent or the seller), the price, the note they wrote, when, and the Inkbox A2A hop that carried it. Never shows seller floors or your budget. Includes watch_url, a live web page for a big screen.",
+      inputSchema: z.object({ request_id: id("buy order (request)") }),
+      outputSchema: resultSchema,
+      view: { name: "conversation", description: "Exchangent agent conversation", prefersBorder: true },
+      annotations: readOnly,
+    },
+    async ({ request_id }, ctx) =>
+      withWatch(runTool(ctx as CallContext, { method: "GET", path: `/buy-requests/${seg(request_id)}/conversation` }, BUYER, { statusKey: "request_status" }, (d) => {
+        const sessions = Array.isArray(d.sessions) ? (d.sessions as { status?: unknown }[]) : [];
+        const open = sessions.filter((x) => x.status === "open").length;
+        return open
+          ? `${open} negotiation(s) still open; call get_conversation again to see new turns, or list_offers to compare current offers.`
+          : "All negotiations have finished; call list_offers to compare offers, then reserve_offer when the human approves.";
+      })),
   );
 
   const list_offers=server.tool(
@@ -546,5 +583,5 @@ export function registerTools(server: MCPServer) {
     },
   );
 
-  return {whoami, create_buy_order, get_buy_order, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request, register_business, get_business, update_business, upsert_inventory_item};
+  return {whoami, create_buy_order, get_buy_order, get_conversation, list_offers, counter_offer, decline_seller, reserve_offer, get_checkout_link, get_reservation_status, list_my_requests, get_negotiation, get_inventory, make_offer, decline_request, register_business, get_business, update_business, upsert_inventory_item};
 }
