@@ -49,6 +49,23 @@ function route(method: string, path: string, body: any): Reply {
       sessions: [{ session_id: IDS.session, status: "open", turn: "buyer", version: 2, rounds: 1, current_offer: { offer_id: IDS.offer, total_cents: 52000 } }],
     });
   }
+  if (method === "GET" && path === `/api/v1/buy-requests/${IDS.request}/conversation`) {
+    return ok({
+      request_id: IDS.request,
+      title: "Desk + chair",
+      status: "negotiating",
+      delegate_negotiation: true,
+      sessions: [{
+        session_id: IDS.session, seller_id: IDS.seller, seller_name: "Mission Desk Co", status: "open", turn: "seller", rounds: 1,
+        seller_agent: true, seller_handle: "exchangent-mission-desk-co", opened_at: "2026-10-18T04:00:00Z",
+        messages: [
+          { kind: "opened", by: "platform", at: "2026-10-18T04:00:00Z", delivery: { transport: "inkbox", from_handle: "exchangent-buyer", to_handle: "exchangent-mission-desk-co", message_id: "aaaaaaaa-0000-4000-8000-000000000001", context_id: "ctx-1", delivered_at: "2026-10-18T04:00:01Z" } },
+          { kind: "offer", by: "seller", total_cents: 52000, note: "Solid oak, delivered tomorrow.", version: 1, offer_id: IDS.offer, at: "2026-10-18T04:00:05Z", delivery: { transport: "inkbox", from_handle: "exchangent-mission-desk-co", to_handle: "exchangent-buyer", message_id: "aaaaaaaa-0000-4000-8000-000000000002", context_id: "ctx-1", delivered_at: "2026-10-18T04:00:06Z" } },
+          { kind: "counter", by: "buyer", total_cents: 45000, note: "Could you do $450?", version: 2, at: "2026-10-18T04:00:09Z" },
+        ],
+      }],
+    });
+  }
   if (method === "GET" && path === `/api/v1/buy-requests/${IDS.request}/offers`) {
     return ok([{ offer_id: IDS.offer, session_id: IDS.session, seller_name: "Mission Desk Co", total_cents: 52000, delivery_cents: 2000 }]);
   }

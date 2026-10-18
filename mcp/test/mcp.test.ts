@@ -11,6 +11,7 @@ import { IDS, startFakeBackend, type FakeBackend } from "./fake-backend.ts";
 const EXPECTED_TOOLS = [
   "create_buy_order",
   "get_buy_order",
+  "get_conversation",
   "list_offers",
   "counter_offer",
   "decline_seller",
@@ -79,13 +80,13 @@ describe("exchangent mcp server", () => {
     assert.deepEqual([...(counter.inputSchema.required ?? [])].sort(), ["expected_version", "session_id", "total_cents"]);
   });
 
-  test("eight tools expose distinct readable MCP App resources",async()=>{
+  test("nine tools expose distinct readable MCP App resources",async()=>{
     const client=await connect("buyer-token");
     const {tools}=await client.listTools();
     const bound=tools.filter(t=>!!(t._meta?.ui as {resourceUri?:string}|undefined)?.resourceUri);
-    assert.equal(bound.length,8);
+    assert.equal(bound.length,9);
     const uris=bound.map(t=>(t._meta!.ui as {resourceUri:string}).resourceUri);
-    assert.equal(new Set(uris).size,8);
+    assert.equal(new Set(uris).size,9);
     for(const uri of uris) {
       const resource=await client.readResource({uri});
       const content=resource.contents[0];
@@ -93,6 +94,27 @@ describe("exchangent mcp server", () => {
       assert.ok('text' in content && content.text.includes('<script'));
       assert.ok(!('text' in content && content.text.includes('rkcs_test_')));
     }
+  });
+
+  test("get_conversation reads the buyer conversation and links the live web page; get_buy_order carries watch_url", async () => {
+    const client = await connect("buyer-token");
+    backend.requests.length = 0;
+    const { result, sc } = await call(client, "get_conversation", { request_id: IDS.request });
+    assert.notEqual(result.isError, true);
+    assert.equal(sc.status, "ok");
+    assert.equal(sc.request_status, "negotiating");
+    assert.equal(sc.sessions[0].messages.length, 3);
+    assert.equal(sc.sessions[0].messages[1].delivery.transport, "inkbox");
+    assert.equal(sc.watch_url, `https://web-five-jet-34.vercel.app/watch/${IDS.request}`);
+    assert.match(sc.next, /still open/);
+    const req = backend.requests.find((r) => r.path === `/api/v1/buy-requests/${IDS.request}/conversation`);
+    assert.equal(req?.method, "GET");
+    assert.equal(req?.headers.authorization, "Bearer buyer-token");
+    const order = await call(client, "get_buy_order", { request_id: IDS.request });
+    assert.equal(order.sc.watch_url, `https://web-five-jet-34.vercel.app/watch/${IDS.request}`);
+    assert.match(order.sc.next, /get_conversation/);
+    const tool = (await client.listTools()).tools.find((t) => t.name === "get_conversation")!;
+    assert.ok((tool._meta?.ui as { resourceUri?: string } | undefined)?.resourceUri, "conversation view bound");
   });
 
   test("create_buy_order forwards the caller's bearer header, an idempotency key and the body", async () => {

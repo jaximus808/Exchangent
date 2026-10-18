@@ -1,7 +1,7 @@
 // Transport interface (doc/negotiation-contract.md, "Agents"):
 //
 //   start(agents)                    bring up receivers for every agent (tunnels, queues)
-//   send(fromAgent, toAgent, event)  deliver one outbox event; resolves once the transport accepted it
+//   send(fromAgent, toAgent, event)  deliver one outbox event; resolves with a receipt once the transport accepted it
 //   onMessage(agent, handler)        handler(message) is called for each inbound message for that agent
 //   close()
 //
@@ -38,10 +38,35 @@ export interface TransportMessage {
 
 export type MessageHandler = (message: TransportMessage) => unknown;
 
+/**
+ * How one outbox event was delivered (doc/conversation-contract.md). The dispatcher acks with it, so the
+ * conversation views can show each hop. Inkbox: identity handles, message id = event id, the A2A context.
+ * In-process: `transport: "local"` and agent slugs. Strings only (the backend stores at most 200 chars each).
+ */
+export interface DeliveryReceipt {
+  transport: "inkbox" | "local";
+  from_handle?: string;
+  to_handle?: string;
+  message_id: string;
+  context_id?: string;
+  delivered_at: string;
+}
+
+/** Receipt for an in-process delivery. No sender (a person in chat) leaves from_handle out. */
+export function localReceipt(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): DeliveryReceipt {
+  return {
+    transport: "local",
+    ...(fromAgent ? { from_handle: fromAgent.slug } : {}),
+    to_handle: toAgent.slug,
+    message_id: event.id,
+    delivered_at: new Date().toISOString(),
+  };
+}
+
 export interface Transport {
   readonly name: string;
   start(agents: Agent[]): Promise<void>;
-  send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<void>;
+  send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<DeliveryReceipt>;
   onMessage(agent: Agent, handler: MessageHandler): void;
   /** Email a human from this agent (Inkbox: the identity's own mailbox; local: logged, not sent). */
   email(from: Agent, message: EmailMessage): Promise<void>;

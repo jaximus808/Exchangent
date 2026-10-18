@@ -73,6 +73,19 @@ and `READY TO RESERVE: offer <id>`. Set `LOG_FORMAT=json` to get one JSON object
     the seller has no identity here.
   - Demo businesses without an account have no owner email, so nothing is sent.
 
+### Transcript and delivery receipts
+
+- **Transcript:** each delivered offer, counter or decline prints one line, using the total and note from the
+  event payload:
+  `💬 Alex Woodworks agent → Buyer agent: $300.00 "Deal at $300." [inkbox exchangent-alex-woodworks → exchangent-buyer]`
+- **Delivery receipts:** the runner acks each delivered event with a receipt
+  (`POST /worker/events/:id/ack` with body `{delivery}`), in the shape
+  `{transport, from_handle, to_handle, message_id, context_id, delivered_at}`.
+  - **Inkbox:** the identity handles, the outbox event ID as the message ID, and the session's A2A context.
+  - **In-process:** `local` and agent slugs.
+  - **Skipped and backlog acks** send no receipt.
+- **What it's for:** the backend stores receipts for the conversation views (`doc/conversation-contract.md`).
+
 ### Mock brain rules
 
 - **Seller.** It calls `get_negotiation` and `get_inventory`. For each requirement line it picks the cheapest

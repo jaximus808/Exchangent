@@ -334,8 +334,12 @@ test("send: identities on demand, agent-scoped keys, registration, A2A message s
 
   // A second event in the same session reuses the stored context; identities are not re-created.
   const offer: WorkerEvent = { id: randomUUID(), kind: "offer.created", created_at: new Date().toISOString(), payload: { session_id: "sess-1", request_id: "req-1", offer_id: "o-1", total_cents: 42000, note: "Bundle", budget_cents: 99999 }, route: { to_role: "buyer", seller_id: "s-acme" } };
-  await transport.send(acme, buyer, offer);
+  const receipt = await transport.send(acme, buyer, offer);
   const s2 = fake.org.sent[1];
+  assert.deepEqual({ ...receipt, delivered_at: "t" }, {
+    transport: "inkbox", from_handle: "exchangent-acme-desks", to_handle: "exchangent-buyer",
+    message_id: offer.id, context_id: transport.state.data.contexts["sess-1"], delivered_at: "t",
+  }, "receipt names the identities, the message and the A2A context");
   assert.equal(s2.from, "exchangent-acme-desks");
   assert.equal(s2.contextId, transport.state.data.contexts["sess-1"]);
   assert.ok(s2.contextId);
@@ -406,8 +410,9 @@ test("identity cap: ensureIdentity explains the cap without calling Inkbox; send
   const got: TransportMessage[] = [];
   transport.onMessage(bay, (m) => got.push(m));
   const ev = opened("s-bay");
-  await transport.send(buyer, bay, ev);
+  const receipt = await transport.send(buyer, bay, ev);
   assert.deepEqual(got.map((m) => [m.id, m.from]), [[ev.id, "buyer"]]);
+  assert.deepEqual([receipt.transport, receipt.from_handle, receipt.to_handle, receipt.message_id], ["local", "buyer", bay.slug, ev.id], "in-process receipt");
   assert.equal(transport.isLocal(bay), true);
   assert.equal(transport.hasMailbox(bay), false);
   // ...and Bay's replies reach the buyer in-process too (no A2A from an identity Bay doesn't have).
