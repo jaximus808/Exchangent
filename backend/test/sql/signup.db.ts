@@ -217,7 +217,9 @@ test('turning agent negotiation off revokes seller agent tokens and stops mintin
 
 test('anon and authenticated roles cannot run the new functions',async()=>{
  const fns=['commerce_business_json(uuid)','commerce_register_business(uuid,text,text,integer,integer)','commerce_update_business(uuid,jsonb)',
-  'commerce_upsert_inventory(uuid,jsonb)','commerce_mint_seller_agent_token(uuid,text,integer)','commerce_worker_events(integer)','commerce_ack_event(uuid)'];
+  'commerce_upsert_inventory(uuid,jsonb)','commerce_mint_seller_agent_token(uuid,text,integer)','commerce_worker_events(integer)',
+  // 0700 (conversation) replaced the one-argument ack with commerce_ack_event(uuid, jsonb).
+  'commerce_ack_event(uuid,jsonb)'];
  for(const role of ['anon','authenticated']) for(const fn of fns) {
   const [{allowed}]=await sql<{allowed: boolean}>('SELECT has_function_privilege($1,$2,\'EXECUTE\') AS allowed',[role,`public.${fn}`]);
   assert.equal(allowed,false,`${role} ${fn}`);

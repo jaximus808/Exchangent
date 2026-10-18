@@ -55,6 +55,7 @@ data has its own `status` field, it's renamed so it doesn't clash with the envel
 |---|---|---|
 | `create_buy_order` | buyer | `POST /buy-requests` |
 | `get_buy_order` | buyer | `GET /buy-requests/:id` |
+| `get_conversation` | buyer | `GET /buy-requests/:id/conversation`: how the agents negotiated, one chat thread per seller with Inkbox A2A hops (view `conversation`, refreshes every 3 s while open). Adds `watch_url`. |
 | `list_offers` | buyer | `GET /buy-requests/:id/offers` |
 | `counter_offer` | buyer | `POST /sessions/:id/counters` |
 | `decline_seller` | buyer | `POST /sessions/:id/decline` |
@@ -184,6 +185,7 @@ the newest `exc_…` token.
 | Variable | Mode | Required | Meaning |
 |---|---|---|---|
 | `EXCHANGENT_AUTH` | both | no | `bearer` (default) or `oauth`. Any other value fails at startup. |
+| `EXCHANGENT_WEB_URL` | both | no | Web app base for `watch_url` (`<base>/watch/<request_id>`) on `create_buy_order`, `get_buy_order` and `get_conversation`. Default `https://web-five-jet-34.vercel.app`. |
 | `EXCHANGENT_API_URL` | both | yes in prod | Backend base, for example `https://exchangent.vercel.app/api/v1` (default `http://127.0.0.1:8787/api/v1`). oauth mode also calls `GET /me` here. |
 | `EXCHANGENT_TOKEN` | bearer | no | Dev-only fallback when the MCP request has no `Authorization` header. Ignored in oauth mode. |
 | `PORT`, `HOST` | both | no | Listen port (3100) and host. Set `HOST=0.0.0.0` on Manufact if the runtime doesn't. |

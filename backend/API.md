@@ -253,6 +253,56 @@ While it is on, the worker can mint a short-lived seller token for the platform 
   row: acking that row's ID is `404 event_not_found`.
 - `POST /worker/events/:id/ack` on a sale notice returns `kind: "order.confirmed"`.
 
+## Agent conversation and the web dashboard
+
+Migration `20261018000700_conversation.sql` (doc/conversation-contract.md). Apply it **before** deploying this
+backend: the conversation and dashboard routes need it. Acks keep working either way, because an ack with a
+receipt falls back to the plain ack while the migration is missing.
+
+**Delivery receipts:** `POST /api/v1/worker/events/:id/ack` (worker) takes an optional body
+`{ "delivery": { transport, from_handle, to_handle, message_id, context_id, delivered_at } }`.
+- **Validation:** values are strings of at most 200 characters, and `transport` is `inkbox` or `local`. Other
+  keys are dropped. A non-object delivery or a bad value is `400 invalid_input`.
+- **No receipt:** an empty body or `delivery: null` acks without one.
+- **Retries:** the first receipt wins on a retried ack. The response is unchanged.
+
+**Message** (one move; optional fields are absent, never null):
+`{ kind: "opened"|"offer"|"counter"|"declined", by: "platform"|"seller"|"buyer", total_cents?, note?, reason?, version?, offer_id?, counter_id?, at, delivery? }`
+- `delivery` is the receipt of the outbox event that announced the move: `session.opened`, `offer.created`,
+  `counter.created` or `session.declined`. It is absent until the runner acks that event.
+- `reason` appears on declines only.
+
+**Session conversation:**
+`{ session_id, request_id, seller_id, seller_name, status, turn, rounds, seller_agent, seller_handle, opened_at, current_offer: { offer_id, total_cents, expires_at } | null, messages: [Message] }`
+- `seller_agent` is the business's `delegate_negotiation`.
+- `current_offer` is set only while the session is open and its latest offer is current.
+
+| Route | Access | Result |
+|---|---|---|
+| `GET /buy-requests/:id/conversation` (role or connector token) | `buyer` (own request) or `buyer_agent` (delegated request) | `{ request_id, title, status, delegate_negotiation, created_at, sessions: [Session conversation], best_offer: { session_id, seller_name, offer_id, total_cents } \| null, reservation: { reservation_id, offer_id, seller_id, status, total_cents } \| null }`. Sessions are sorted by seller name. |
+| `GET /buy-requests/:id/conversation` (user session) | The owner (or a request-bound `request:read` delegation) | The same JSON, for the web live page |
+| `GET /seller/sessions/:id/conversation` | `seller`: own session only (403 otherwise, 404 if missing) | One session conversation |
+
+None of these carry floors, budgets, targets, line items, buyer IDs or buyer email.
+
+**Web dashboard routes (user session only):** a delegation token gets `403 user_session_required`, and a role
+or connector token gets 404.
+
+| Route | Result |
+|---|---|
+| `GET /api/v1/buy-requests` | Newest first, up to 50. Each item keeps the original fields `{ id, requirements, status, currency, created_at }` and adds `{ request_id, title, structured_requirements, budget_cents, target_cents, delegate_negotiation, seller_count, open_sessions, best_offer: { offer_id, seller_name, total_cents } \| null, reservation: { reservation_id, offer_id, status, total_cents } \| null }`. The budget and target are the buyer's own. |
+| `GET /api/v1/businesses` | The person's businesses: business JSON plus `{ inventory: [InventoryItem with floor_cents], open_sessions, orders, sales_cents }` |
+| `GET /api/v1/businesses/:id/sessions` | Owner only. The business's negotiations, newest first: session conversation plus `request: { request_id, title, status, requirements, deadline, created_at }`. No budget, target or buyer. |
+| `POST /api/v1/businesses/:id/inventory` | Owner only. Same body, validation and result as `POST /seller/inventory`. |
+| `PATCH /api/v1/businesses/:id` | Owner only. Same keys, validation and result as `PATCH /seller/business`. |
+
+**Errors on the business routes:**
+- `invalid_id`: 400.
+- `not_found`: 404.
+- `forbidden` (not the owner): 403.
+- `invalid_input`: 400.
+- `business_name_taken`: 409.
+
 ## MCP and dashboard integration
 
 - The Manufact MCP OAuth handshake belongs to the teammate. An arbitrary ChatGPT,

@@ -29,8 +29,8 @@ import type {
 } from "@inkbox/sdk";
 import type { connect, TunnelListener } from "@inkbox/sdk/tunnels/connect";
 import { JsonState } from "../state.ts";
-import { publicPayload, toMessage } from "./index.ts";
-import type { MessageHandler, PublicPayload, Transport, TransportMessage } from "./index.ts";
+import { localReceipt, publicPayload, toMessage } from "./index.ts";
+import type { DeliveryReceipt, MessageHandler, PublicPayload, Transport, TransportMessage } from "./index.ts";
 import type { Agent } from "../agents.ts";
 import type { EventKind, WorkerEvent } from "../backend.ts";
 import { logger, money, short } from "../log.ts";
@@ -566,7 +566,7 @@ export class InkboxTransport implements Transport {
   }
 
   /** Send one outbox event as an A2A message from fromAgent's identity to toAgent's identity. */
-  async send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<void> {
+  async send(fromAgent: Agent | null, toAgent: Agent, event: WorkerEvent): Promise<DeliveryReceipt> {
     // No sender agent (a person negotiating in chat), or either side has no identity: deliver in-process.
     const fromRec = fromAgent ? await this.#identityOrLocal(fromAgent) : null;
     const toRec = fromRec ? await this.#identityOrLocal(toAgent, event.route?.agent_handle) : null;
@@ -576,7 +576,7 @@ export class InkboxTransport implements Transport {
       await handler(toMessage(fromAgent, event));
       const why = !fromAgent ? "counterparty negotiates in chat" : `${(fromRec ? toAgent : fromAgent).name} has no Inkbox identity`;
       log.info("delivered in-process", { from: fromAgent?.id, to: toAgent.id, kind: event.kind, event: event.id, why });
-      return;
+      return localReceipt(fromAgent, toAgent, event);
     }
     const a2a = await this.#a2a(fromAgent.id);
     const target = await this.#card(fromAgent.id, toRec);
@@ -594,6 +594,15 @@ export class InkboxTransport implements Transport {
       this.state.save();
     }
     log.info("a2a sent", { from: fromAgent.id, to: toRec.handle, kind: event.kind, event: event.id, context: short(newContext || contextId) });
+    const context = contextId || newContext;
+    return {
+      transport: "inkbox",
+      from_handle: fromRec.handle,
+      to_handle: toRec.handle,
+      message_id: event.id,
+      ...(context ? { context_id: context } : {}),
+      delivered_at: new Date().toISOString(),
+    };
   }
 
   /** Send from the agent's own Inkbox mailbox (every identity has one). */
