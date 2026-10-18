@@ -66,11 +66,11 @@ Additive only.
   - **Before load:** a signed-in buyer page. Signed out, it shows the sign-in form, then returns to the page.
   - **Data:** polls `/api/commerce/buy-requests/<id>/conversation` every 1.5 s while the request is
     negotiating, and every 10 s afterwards.
-  - **Layout:** a large, projector-friendly layout with one column per seller and messages animating in.
-    - Each bubble shows the price, the note, who moved, and the Inkbox hop (from → to, short message ID).
+  - **Layout:** a light workspace with a seller comparison, one filterable activity feed, and a compact outcome/progress panel.
+    - Each activity entry shows who moved, the price and a short note. Delivery details (including Inkbox hops) expand on demand.
     - A header shows the request title, status, the best offer so far and the elapsed time.
     - When the buyer agent is ready, a "Deal reached" banner appears.
-  - **Design:** dark-friendly, using the existing design tokens in `globals.css`.
+  - **Design:** light by default, using the existing typography and restrained neutral workspace styling.
 - **Proxy allowlist:** the commerce proxy allowlist gains `buy-requests/<id>/conversation`.
 - **Dashboard:** each request in the dashboard links to "Watch agents".
 

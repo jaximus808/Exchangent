@@ -4,6 +4,7 @@ import {ArrowUpRight,Bot,CheckCircle2,Clock3,Loader2,LockKeyhole,MessageSquareTe
 import {agreedDeal,bestOffer,currentOffer,type Conversation} from '@/lib/conversation';
 import {api,ApiError,errorText,money,type BuyRequest,type Offer,type OrderStatus} from '@/lib/workspace';
 import {Thread} from './thread';
+import {checkoutState,savedReservationId} from '@/lib/checkout-view';
 import {Connect} from './connect';
 import {Empty,Status} from './ui';
 import {BuyerOrders} from './orders';
@@ -12,8 +13,8 @@ export const requestTitle=(r:BuyRequest,c?:Conversation|null)=>c?.title||r.title
 export const statusText=(status:string)=>({negotiating:'Negotiating',awaiting_payment:'Reserved · pay to finish',confirmed:'Purchased',expired:'Expired · deadline passed'}[status]??status.replaceAll('_',' '));
 export const statusTone=(status:string)=>status==='negotiating'?'live' as const:status==='confirmed'?'done' as const:'neutral' as const;
 const dateLabel=(d:string)=>new Date(d).toLocaleDateString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
-export const reservationKey=(userId:string)=>`exchangent-reservation-${userId}`;
-const readReservation=(userId:string)=>{try{return localStorage.getItem(reservationKey(userId));}catch{return null;}};
+export const reservationKey=(userId:string,requestId?:string)=>`exchangent-reservation-${userId}${requestId?`-${requestId}`:''}`;
+const readReservation=(userId:string,requestId:string)=>{try{return localStorage.getItem(reservationKey(userId,requestId))??localStorage.getItem(reservationKey(userId));}catch{return null;}};
 
 export function RequestCard({request,conv,active,onSelect}:{request:BuyRequest;conv?:Conversation|null;active?:boolean;onSelect?:()=>void}) {
  const best=bestOffer(conv),deal=agreedDeal(conv);
@@ -32,7 +33,7 @@ export function RequestCard({request,conv,active,onSelect}:{request:BuyRequest;c
 }
 
 function Receipt({order}:{order:OrderStatus}) {
- return <article className="receipt"><div className="receipt-head"><CheckCircle2 size={20}/><div><h3>Purchase confirmed</h3><p>Payment verified by Stripe (test mode). {order.seller?.name?`${order.seller.name} has been notified.`:''}</p></div></div>
+ return <article className="receipt"><div className="receipt-head"><CheckCircle2 size={20}/><div><h3>Purchase confirmed</h3><p>Payment verified by Stripe (test mode). {order.seller?.name?`Sold by ${order.seller.name}.`:''}</p></div></div>
   <dl className="price-breakdown">{order.items?.map(i=><div key={i.title}><dt>{i.quantity}× {i.title}</dt><dd>{money(i.quantity*i.unit_cents)}</dd></div>)}
    {order.delivery_cents!==undefined&&<div><dt>Delivery</dt><dd>{money(order.delivery_cents)}</dd></div>}
    {order.tax_cents!==undefined&&order.tax_cents>0&&<div><dt>Tax</dt><dd>{money(order.tax_cents)}</dd></div>}
@@ -46,16 +47,16 @@ function RequestDetail({userId,request,conv,onChanged}:{userId:string;request:Bu
  const keys=useRef<Record<string,string>>({});
  useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),5000);return()=>clearInterval(t);},[]);
  useEffect(()=>{
-  let alive=true;setOffers([]);setError('');
+  let alive=true;setOffers([]);setOrder(null);setError('');
   const load=async()=>{
    if(document.visibilityState==='hidden') return;
    try {const rows=await api<Offer[]>(`buy-requests/${request.id}/offers`);if(alive) setOffers(rows);} catch {/* the conversation still shows the offers */}
-   const id=readReservation(userId);
-   if(id) try {const row=await api<OrderStatus>(`reservations/${id}`);if(alive) setOrder(row.request_id===undefined||row.request_id===request.id?row:null);} catch {if(alive) setOrder(null);}
+   const id=savedReservationId(request.id,conv)??readReservation(userId,request.id);
+   if(id) try {const row=await api<OrderStatus>(`reservations/${id}`);if(alive) setOrder(row.request_id===request.id?row:null);} catch {if(alive) setOrder(null);}
   };
   void load();const t=setInterval(load,request.status==='negotiating'?4000:12000);
   return()=>{alive=false;clearInterval(t);};
- },[request.id,request.status,userId]);
+ },[request.id,request.status,userId,conv?.reservation?.reservation_id]);
  const sellerName=(sellerId:string)=>conv?.sessions.find(s=>s.seller_id===sellerId)?.seller_name??'Seller';
  const deal=agreedDeal(conv),best=bestOffer(conv);
  const live=offers.filter(o=>o.is_current&&Date.parse(o.expires_at)>now).sort((a,b)=>a.total_cents-b.total_cents);
@@ -70,28 +71,32 @@ function RequestDetail({userId,request,conv,onChanged}:{userId:string;request:Bu
   try {
    keys.current[offer.id]??=crypto.randomUUID();
    const hold=await api<{id:string}>(`offers/${offer.id}/reservations`,{method:'POST',headers:{'idempotency-key':keys.current[offer.id]},body:JSON.stringify({expected_total_cents:offer.total_cents})});
-   try{localStorage.setItem(reservationKey(userId),hold.id);}catch{/* storage blocked: status still loads from the request */}
+   try{localStorage.setItem(reservationKey(userId,request.id),hold.id);}catch{/* storage blocked: status still loads from the request */}
    onChanged();
    await checkout(hold.id);
   } catch(e) {setError(e instanceof ApiError&&e.code==='request_already_reserved'?'This request already has a reservation. Use “Continue to checkout”.':e instanceof ApiError&&e.code==='price_changed'?'The price changed. Review the updated offer and try again.':errorText(e,'Checkout couldn’t be opened.'));}
   finally {setBusy(null);}
  }
- const reservationId=readReservation(userId);
+ const reservationId=savedReservationId(request.id,conv,order);
+ const payment=checkoutState(request.status,order,conv);
  const sessions=conv?.sessions??[];
  return <section className="request-detail" aria-labelledby="detail-title">
   <header className="detail-head">
    <div><div className="detail-meta"><Status tone={statusTone(request.status)}>{statusText(request.status)}</Status><span className="mono">REQ {request.id.slice(0,8).toUpperCase()}</span></div><h2 id="detail-title">{requestTitle(request,conv)}</h2>{request.requirements&&request.requirements!==conv?.title&&<p>{request.requirements}</p>}</div>
    <a className="button primary" href={`/watch/${request.id}`} target="_blank" rel="noopener"><Radio size={15}/>Watch agents live</a>
   </header>
-  {request.status==='confirmed'&&order?.order?<Receipt order={order}/>:null}
+  {payment==='confirmed'&&order?.order?<Receipt order={order}/>:null}
+  {payment==='reversed'&&<div className="deal-callout"><ShieldCheck size={18}/><div><strong>{order?.order?.status==='refunded'?'Order refunded':'Order cancelled'}</strong><span>See Orders for the current case and payment details. Don’t pay again.</span></div></div>}
+  {payment==='verifying'&&<div className="deal-callout"><ShieldCheck size={18}/><div><strong>Verifying payment</strong><span>No action needed. Please don’t pay again.</span></div></div>}
+  {payment==='ended'&&<p className="muted small-copy">This hold has ended. Review the current offers to continue.</p>}
   {deal&&request.status==='negotiating'&&<div className="deal-callout"><PartyPopper size={18}/><div><strong>Your agent reached a deal: {deal.session.seller_name}, {money(deal.offer.total_cents!)}</strong><span>Nothing is reserved or charged until you approve it below.</span></div></div>}
-  {request.status==='awaiting_payment'&&reservationId&&<div className="deal-callout"><LockKeyhole size={18}/><div><strong>Your items are on hold.</strong><span>Finish the Stripe test checkout to confirm the order.</span></div><button className="button primary compact" disabled={busy!==null} onClick={()=>{setBusy('checkout');checkout(reservationId).catch(e=>setError(errorText(e))).finally(()=>setBusy(null));}}>{busy==='checkout'?<Loader2 size={14} className="spin"/>:null}Continue to checkout</button></div>}
+  {request.status==='awaiting_payment'&&payment==='approval'&&reservationId&&<div className="deal-callout"><LockKeyhole size={18}/><div><strong>Your items are on hold.</strong><span>Finish the Stripe test checkout to confirm the order.</span></div><button className="button primary compact" disabled={busy!==null} onClick={()=>{setBusy('checkout');checkout(reservationId).catch(e=>setError(errorText(e))).finally(()=>setBusy(null));}}>{busy==='checkout'?<Loader2 size={14} className="spin"/>:null}Continue to checkout</button></div>}
   {error&&<p className="form-error" role="alert">{error}</p>}
   <div className="detail-section"><div className="section-heading"><h2>Current offers <span className="number-tag">{live.length}</span></h2><span className="toolbar-caption"><ShieldCheck size={13}/>You approve every payment</span></div>
    {live.length?<div className="offer-rows">{live.map(o=>{const name=sellerName(o.seller_id);const isBest=best?.offer.offer_id===o.id;return <div className={`offer-row ${isBest?'best':''}`} key={o.id}>
     <div className="offer-row-name"><strong>{name}</strong><span><Clock3 size={12}/>Expires {new Date(o.expires_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}{o.delivery_cents?` · ${money(o.delivery_cents)} delivery`:' · free delivery'}</span></div>
     <div className="offer-row-price">{money(o.total_cents)}{isBest&&<span>Lowest</span>}</div>
-    <button className="button secondary compact" disabled={busy!==null||request.status!=='negotiating'} onClick={()=>void reserve(o)}>{busy===o.id?<Loader2 size={14} className="spin"/>:<LockKeyhole size={13}/>}Reserve & pay</button>
+    <button className="button secondary compact" disabled={busy!==null||payment==='verifying'||payment==='confirmed'||payment==='reversed'||request.status!=='negotiating'} onClick={()=>void reserve(o)}>{busy===o.id?<Loader2 size={14} className="spin"/>:<LockKeyhole size={13}/>}Reserve & pay</button>
    </div>;})}</div>:<p className="muted small-copy">{request.status==='negotiating'?'Offers appear as sellers’ agents respond.':'No open offers on this request.'}</p>}
   </div>
   <div className="detail-section"><div className="section-heading"><h2><MessageSquareText size={16}/>How the agents talked</h2><a className="text-button" href={`/watch/${request.id}`} target="_blank" rel="noopener">Open live view<ArrowUpRight size={13}/></a></div>

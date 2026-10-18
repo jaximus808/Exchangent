@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback,useEffect,useState,useTransition} from 'react';
+import {useCallback,useEffect,useRef,useState,useTransition} from 'react';
 import {AnimatePresence,motion,useReducedMotion} from 'motion/react';
 import {ArrowRight,Bot,Check,ChevronRight,LayoutDashboard,Loader2,LockKeyhole,LogOut,Menu,Plug,Plus,Radio,ShieldCheck,ShoppingBag,Store,X} from 'lucide-react';
 import {endSession} from '@/app/actions';
@@ -60,12 +60,13 @@ function Workspace({user}:{user:User}) {
  const[view,setView]=useState<View>('Overview');const[mobileNav,setMobileNav]=useState(false);
  const[requests,setRequests]=useState<BuyRequest[]>([]);const[convs,setConvs]=useState<Record<string,Conversation|null>>({});
  const[businesses,setBusinesses]=useState<Business[]>([]);const[selected,setSelected]=useState('');
+ const[businessError,setBusinessError]=useState('');const[businessBusy,setBusinessBusy]=useState(false);const businessInFlight=useRef(false);
  const[loadingRequests,setLoadingRequests]=useState(true);const[loadingBusinesses,setLoadingBusinesses]=useState(true);
  const[error,setError]=useState('');const[notice,setNotice]=useState('');const[creating,setCreating]=useState(false);
  const[signingOut,startSignOut]=useTransition();
  const nav=(next:View)=>{setView(next);setMobileNav(false);try{history.replaceState(null,'',next==='Overview'?location.pathname:`#${next.toLowerCase()}`);}catch{/* history blocked */}};
  // Deep links: /#buying, /#selling, /#connect.
- useEffect(()=>{const hash=location.hash.slice(1).toLowerCase();const match=NAV.find(n=>n.label.toLowerCase()===hash);if(match)setView(match.label);},[]);
+ useEffect(()=>{const hash=location.hash.slice(1).toLowerCase();const match=NAV.find(n=>n.label.toLowerCase()===hash);if(match)setView(match.label);const request=new URLSearchParams(location.search).get('request');if(request&&/^[0-9a-f-]{36}$/i.test(request))setSelected(request);},[]);
  useEffect(()=>{if(!notice)return;const id=setTimeout(()=>setNotice(''),4500);return()=>clearTimeout(id);},[notice]);
 
  const loadRequests=useCallback(async()=>{
@@ -78,14 +79,16 @@ function Workspace({user}:{user:User}) {
   } catch(e){setError(errorText(e,'Your requests couldn’t be loaded.'));}
   finally{setLoadingRequests(false);}
  },[]);
- const loadBusinesses=useCallback(async()=>{
-  if(document.visibilityState==='hidden') return;
-  try {setBusinesses(await api<Business[]>('businesses'));} catch {/* selling stays empty; buying still works */}
-  finally{setLoadingBusinesses(false);}
+ const loadBusinesses=useCallback(async(signal?:AbortSignal)=>{
+  if(document.visibilityState==='hidden'||businessInFlight.current||signal?.aborted)return;
+  businessInFlight.current=true;setBusinessBusy(true);
+  try {const rows=await api<Business[]>('businesses',{signal});if(!signal?.aborted){setBusinesses(rows);setBusinessError('');}}
+  catch(e){if(!signal?.aborted)setBusinessError(errorText(e,'Your businesses couldn’t refresh.'));}
+  finally{businessInFlight.current=false;if(!signal?.aborted){setLoadingBusinesses(false);setBusinessBusy(false);}}
  },[]);
  const negotiating=requests.some(r=>r.status==='negotiating');
  useEffect(()=>{void loadRequests();const t=setInterval(loadRequests,negotiating?5000:15000);return()=>clearInterval(t);},[loadRequests,negotiating]);
- useEffect(()=>{void loadBusinesses();const t=setInterval(loadBusinesses,20000);return()=>clearInterval(t);},[loadBusinesses]);
+ useEffect(()=>{const refresh=()=>void loadBusinesses();refresh();const t=setInterval(refresh,view==='Selling'?5000:20000);document.addEventListener('visibilitychange',refresh);window.addEventListener('focus',refresh);return()=>{clearInterval(t);document.removeEventListener('visibilitychange',refresh);window.removeEventListener('focus',refresh);};},[loadBusinesses,view]);
 
  const live=requests.filter(r=>r.status==='negotiating');
  const deals=requests.map(r=>agreedDeal(convs[r.id])).filter(Boolean);
@@ -126,7 +129,7 @@ function Workspace({user}:{user:User}) {
      <Connect compact/>
     </div>}
     {view==='Buying'&&<Buying userId={user.id} requests={requests} convs={convs} loading={loadingRequests} selected={selected} onSelect={setSelected} onChanged={()=>void loadRequests()}/>}
-    {view==='Selling'&&<Selling businesses={businesses} loading={loadingBusinesses} onCreate={()=>setCreating(true)} onChanged={b=>setBusinesses(list=>list.map(x=>x.seller_id===b.seller_id?{...x,...b}:x))}/>}
+    {view==='Selling'&&<><div className="selling-sync"><span role="status">{businessBusy?'Refreshing stock…':businessError?'Stock updates interrupted':'Stock refreshes automatically'}</span><button className="text-button" disabled={businessBusy} onClick={()=>void loadBusinesses()}>Refresh</button></div>{businessError&&<p className="form-error" role="alert">{businessError} Your last saved view is kept.</p>}{(!businessError||businesses.length>0)&&<Selling businesses={businesses} loading={loadingBusinesses} onCreate={()=>setCreating(true)} onChanged={b=>setBusinesses(list=>list.map(x=>x.seller_id===b.seller_id?{...x,...b}:x))}/>}</>}
     {view==='Connect'&&<Connect/>}
     <footer className="page-footer"><span><Brand small/>Built for people. Open to agents.</span><span>Test payments only · no real money moves.</span></footer>
    </main>

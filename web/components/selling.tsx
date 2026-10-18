@@ -1,9 +1,11 @@
 'use client';
-import {useCallback,useEffect,useState} from 'react';
+import {useCallback,useEffect,useRef,useState} from 'react';
 import {Bot,Loader2,LockKeyhole,MessageSquareText,Plus,Scale,Store,Trash2,Truck,UserRound} from 'lucide-react';
 import {currentOffer,type ConvSession} from '@/lib/conversation';
 import {api,ApiError,dollarsToCents,errorText,money,type Business,type InventoryItem} from '@/lib/workspace';
 import {Thread} from './thread';
+import {SellerStockMoves} from './purchase-finish';
+import {stockMoves,type StockMove} from '@/lib/purchase-finish';
 import {Empty,Status,Toggle,WorkspaceDialog,initials} from './ui';
 import {PolicyEditor,SellerOrders} from './orders';
 
@@ -84,14 +86,16 @@ function AddItemForm({business,onAdded}:{business:Business;onAdded:(item:Invento
 function BusinessPanel({business,onUpdated}:{business:Business;onUpdated:(b:Business)=>void}) {
  const[inventory,setInventory]=useState<InventoryItem[]|null|undefined>(business.inventory);
  const[sessions,setSessions]=useState<SellerSession[]|null>(null);
+ const[moves,setMoves]=useState<StockMove[]>([]);
+ const[stockChanges,setStockChanges]=useState<Record<string,string>>({});const previousStock=useRef(business.inventory);
+ useEffect(()=>{if(!business.inventory)return;const prior=new Map(previousStock.current?.map(i=>[i.inventory_id,i])??[]);const changes:Record<string,string>={};for(const item of business.inventory){const old=prior.get(item.inventory_id);if(!old){if(previousStock.current)changes[item.inventory_id]='New item';continue;}const sold=(item.sold??0)-(old.sold??0),delta=item.available-old.available;if(sold>0)changes[item.inventory_id]=`${sold} sold`;else if(delta!==0)changes[item.inventory_id]=`${delta>0?'+':''}${delta} available`;}if(Object.keys(changes).length)setStockChanges(changes);const observed=stockMoves(previousStock.current,business.inventory);if(observed.length)setMoves(observed);previousStock.current=business.inventory;setInventory(business.inventory);},[business.inventory]);
  const[toggling,setToggling]=useState(false);const[error,setError]=useState('');const[adding,setAdding]=useState(false);const[policyOpen,setPolicyOpen]=useState(false);
  const[now,setNow]=useState(()=>Date.now());
  useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),5000);return()=>clearInterval(t);},[]);
  const load=useCallback(async()=>{
   if(document.visibilityState==='hidden') return;
   try {setSessions(normalizeSessions(await api<unknown>(`businesses/${business.seller_id}/sessions`),business));} catch {setSessions(s=>s??[]);}
-  if(business.inventory) setInventory(business.inventory);
-  else try {setInventory(await api<InventoryItem[]>(`businesses/${business.seller_id}/inventory`));} catch(e) {setInventory(e instanceof ApiError&&e.status===404?null:i=>i??null);}
+  if(!business.inventory) try {setInventory(await api<InventoryItem[]>(`businesses/${business.seller_id}/inventory`));} catch(e) {setInventory(e instanceof ApiError&&e.status===404?null:i=>i??null);}
  },[business]);
  useEffect(()=>{void load();const t=setInterval(load,5000);return()=>clearInterval(t);},[load]);
  async function toggle(on:boolean) {
@@ -109,9 +113,10 @@ function BusinessPanel({business,onUpdated}:{business:Business;onUpdated:(b:Busi
   {error&&<p className="form-error" role="alert">{error}</p>}
   <div className="business-grid">
    <section className="inventory-section"><div className="section-heading"><h2>Inventory <span className="number-tag">{inventory?.length??0}</span></h2><button className="button secondary compact" onClick={()=>setAdding(true)}><Plus size={14}/>Add item</button></div>
+    <SellerStockMoves moves={moves}/>
     {inventory===undefined?<div className="skeleton"/>:inventory===null?<p className="muted small-copy">Inventory is managed from Claude: “show my inventory”.</p>:inventory.length===0?<Empty title="No stock yet.">Add what you sell with a list price and a private minimum. Your agent never goes below it.</Empty>:
      <div className="inventory-table" role="table" aria-label={`${business.name} inventory`}><div role="row" className="inv-row inv-head"><span role="columnheader">Item</span><span role="columnheader">List</span><span role="columnheader">Minimum</span><span role="columnheader">Stock</span></div>
-      {inventory.map(i=><div role="row" className="inv-row" key={i.inventory_id}><span role="cell"><strong>{i.title}</strong><small>{[i.category,attrText(i)].filter(Boolean).join(' · ')}</small></span><span role="cell">{i.list_cents!=null?money(i.list_cents):'—'}</span><span role="cell" className="private"><LockKeyhole size={11}/>{money(i.floor_cents)}</span><span role="cell">{i.available}{i.sold?<small>{i.sold} sold</small>:null}</span></div>)}</div>}
+      {inventory.map(i=><div role="row" className="inv-row" key={i.inventory_id}><span role="cell"><strong>{i.title}</strong><small>{[i.category,attrText(i)].filter(Boolean).join(' · ')}</small></span><span role="cell">{i.list_cents!=null?money(i.list_cents):'—'}</span><span role="cell" className="private"><LockKeyhole size={11}/>{money(i.floor_cents)}</span><span role="cell">{i.available}{i.sold?<small>{i.sold} sold</small>:null}{stockChanges[i.inventory_id]&&<small className="inventory-change">Latest: {stockChanges[i.inventory_id]}</small>}</span></div>)}</div>}
    </section>
    <section className="negotiations-section"><div className="section-heading"><h2><MessageSquareText size={16}/>Negotiations <span className="number-tag">{open.length}</span></h2><Status tone={open.length?'live':'muted'}>{open.length?'Live':'Quiet'}</Status></div>
     {sessions===null?<div className="skeleton"/>:sessions.length===0?<p className="muted small-copy">Matching buy requests appear here, with every message between your agent and the buyer’s agent.</p>:
@@ -123,7 +128,7 @@ function BusinessPanel({business,onUpdated}:{business:Business;onUpdated:(b:Busi
    {policyOpen&&<PolicyEditor business={business} onSaved={()=>setPolicyOpen(false)}/>}
   </WorkspaceDialog>
   <WorkspaceDialog open={adding} onClose={()=>setAdding(false)} title="Add an item" description="List price is your opening ask. Your minimum stays private: buyers only ever see offers.">
-   <AddItemForm business={business} onAdded={item=>{setInventory(list=>[...(list??[]).filter(i=>i.inventory_id!==item.inventory_id),item]);setAdding(false);}}/>
+   <AddItemForm business={business} onAdded={item=>{const next=[...(inventory??[]).filter(i=>i.inventory_id!==item.inventory_id),item];setInventory(next);onUpdated({...business,inventory:next});setAdding(false);}}/>
   </WorkspaceDialog>
  </article>;
 }

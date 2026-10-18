@@ -9,10 +9,11 @@ export type ConvMessage={
 };
 export type ConvSession={
  session_id:string;seller_id:string;seller_name:string;status:string;turn?:string|null;rounds?:number;
+ current_offer?:{offer_id:string;total_cents:number;expires_at:string}|null;
  seller_agent?:boolean;seller_handle?:string|null;opened_at?:string;messages:ConvMessage[];
  request_id?:string;title?:string|null;request_title?:string|null;request_status?:string|null;
 };
-export type Conversation={request_id:string;title?:string|null;status:string;delegate_negotiation?:boolean;sessions:ConvSession[]};
+export type Conversation={request_id:string;title?:string|null;status:string;delegate_negotiation?:boolean;sessions:ConvSession[];reservation?:{reservation_id:string;offer_id:string;seller_id?:string;status:string;total_cents:number}|null};
 export type Perspective='buyer'|'seller';
 
 /** The seller's latest offer in an open session, or null. */
@@ -26,10 +27,13 @@ function lastCounter(s:ConvSession,before=s.messages.length):ConvMessage|null {
  return null;
 }
 /** Lowest current offer across open sessions. */
-export function bestOffer(c:Conversation|null|undefined):{session:ConvSession;offer:ConvMessage}|null {
+export function bestOffer(c:Conversation|null|undefined,now=Date.now()):{session:ConvSession;offer:ConvMessage}|null {
  let best:{session:ConvSession;offer:ConvMessage}|null=null;
  for(const session of c?.sessions??[]) {
+  const current=session.current_offer;
+  if(!current||!Number.isFinite(current.total_cents)||!Number.isFinite(Date.parse(current.expires_at))||Date.parse(current.expires_at)<=now)continue;
   const offer=currentOffer(session);
+  if(offer?.offer_id!==current.offer_id)continue;
   if(offer?.total_cents!==undefined&&(!best||offer.total_cents<(best.offer.total_cents??Infinity))) best={session,offer};
  }
  return best;
@@ -38,10 +42,11 @@ export function bestOffer(c:Conversation|null|undefined):{session:ConvSession;of
  * A seller met the buyer's own counter: the latest message in an open session is an offer at or below the
  * buyer's previous counter. That is the moment the buyer agent stops and tells the human.
  */
-export function agreedDeal(c:Conversation|null|undefined):{session:ConvSession;offer:ConvMessage}|null {
+export function agreedDeal(c:Conversation|null|undefined,now=Date.now()):{session:ConvSession;offer:ConvMessage}|null {
  const deals=(c?.sessions??[]).flatMap(session=>{
   const last=session.messages.at(-1);
-  if(session.status!=='open'||last?.kind!=='offer'||last.total_cents===undefined) return [];
+  const current=session.current_offer;
+  if(session.status!=='open'||!current||Date.parse(current.expires_at)<=now||!Number.isFinite(Date.parse(current.expires_at))||last?.kind!=='offer'||last.offer_id!==current.offer_id||last.total_cents===undefined) return [];
   const counter=lastCounter(session,session.messages.length-1);
   return counter?.total_cents!==undefined&&last.total_cents<=counter.total_cents?[{session,offer:last}]:[];
  });

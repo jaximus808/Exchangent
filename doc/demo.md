@@ -1,190 +1,138 @@
-# Demo runbook: agents negotiating over Inkbox
+# Demo runbook: autonomous negotiation, human-approved payment
 
-The story: you tell Claude what you want. Your buyer agent and the sellers' agents haggle with each other over
-Inkbox A2A until they agree. Exchangent's database is the rulebook every agent obeys. The buyer agent emails
-you from its Inkbox mailbox when it has a deal. You reserve and pay in Claude, and the seller's agent emails its owner when the order is paid.
+Demo target: Sunday, October 18, 2026. Use Stripe test mode and fictional inventory only.
+A connected human asks once; an independent worker runs buyer/seller turns through MCP, and Inkbox
+carries recorded negotiation notifications. The database enforces authority, floors, stock and versions.
+The human reviews the current offer and approves payment in hosted Stripe Checkout.
 
-## How the agents communicate
+## Connections and ownership
 
-```
- seller agent ──make_offer (MCP)──▶ backend ──▶ Postgres: offer row + outbox row "offer.created"
-                                                         │
-                                  runner polls outbox ◀──┘
-                                         │
-       Inkbox A2A message  exchangent-bay-desk-co ──▶ exchangent-buyer
-       (one A2A context per negotiation session; data part = kind + IDs + public total; text part = short note)
-                                         │
- buyer agent ◀── tunnel webhook (signed) ┘
-     │
-     └─ get_buy_order (MCP) ──▶ reads the offer from the database, then counter_offer (MCP) ──▶ ...and back again
-```
+| Connection | Endpoint | Credential |
+|---|---|---|
+| Human buyer or business owner | `https://fast-cloud-tpp4j.run.mcp-use.com/mcp` | OAuth; choose Buyer or the owned business at consent |
+| Background agents | `https://warm-pulse-8qbp6.run.mcp-use.com/mcp` | Per-agent role token; do not replace this with the human OAuth endpoint |
+| Commerce backend | `https://exchangent.vercel.app` | Verified user, connector, worker or role token, checked per operation |
+| Human dashboard | `https://web-five-jet-34.vercel.app` | The same buyer/seller email used at connector consent |
 
-- **The message is the notification, and the database is the governing layer.** An agent acts only through
-  MCP tools. The backend enforces whose turn it is, the version (`expected_version`), price floors, stock and
-  the budget, then writes the offer and an outbox row in one transaction.
-- **Inkbox carries the "you've got a new offer" message** from the sender's identity to the recipient's
-  identity, with one A2A context (thread) per session.
-- **The recipient never trusts numbers in the message.** Every turn starts by re-reading the session or order
-  over MCP. A tampered or replayed message can't move money or break a rule (the e2e test tampers with totals
-  on purpose).
-- **`TRANSPORT=local`** is the same flow with the Inkbox hop replaced by an in-process queue.
+Use two different emails for buyer and seller: self-owned businesses do not match their owner's requests.
+Use an existing owned business where possible; do not create another "Alex Woodworks" each rehearsal.
+Private floors belong only in the owner's account. Never project them in the buyer view, shared notes or emails.
 
-## Cast
+## Before rehearsal
 
-Two different people, each in their own Claude with the Exchangent connector
-(`https://fast-cloud-tpp4j.run.mcp-use.com/mcp`). Nobody is seeded: any email signs in with a code, and a new
-email creates the account.
-
-| Who | Signs in as | Their agent | Inkbox identity |
-|---|---|---|---|
-| **Seller** (person A, any email) | **Create a business** on the consent screen, then stocks it in chat | Platform seller agent, minted for the business while "let my agent negotiate" is on | `exchangent-<business-slug>` |
-| **Buyer** (person B, a different email) | **Buyer account** | Platform buyer agent (`buyer_agent` token) | `exchangent-buyer` |
-| Competitor (optional) | nobody: seeded Bay Desk Co | Seeded seller agent | `exchangent-bay-desk-co` |
-
-- Mission Ergonomics and SoMa Office Supply still compete, but they use in-process delivery
-  (`INKBOX_LOCAL_SELLERS`).
-- **The free Inkbox plan has 3 identities: buyer, the new business, and Bay.** If all 3 are already taken, the
-  new business falls back to in-process delivery: it still negotiates, but its messages don't go over Inkbox.
-  Free a slot first by deleting an unused identity (for example `exchangent-mission-ergonomics`) in the Inkbox
-  console.
-- The seller can turn the agent off (`update_business` with `agent_negotiates:false`) and haggle by hand with
-  `list_my_requests`, `get_negotiation` and `make_offer`. The buyer agent still answers. A late, cheaper offer
-  reopens the haggle, and the buyer then gets a "Better deal" email.
-
-## One-time setup (live)
-
-1. **Apply migrations** from the repo root:
-   ```bash
-   npx -y @insforge/cli db migrations up --all    # through 20261018000600 self-serve sign-up
+1. Apply all migrations through `20261018000900_resolution.sql` with the linked InsForge project:
+   `npx -y @insforge/cli db migrations up --all`. Verify backend, both MCP deployments and web use the same revision.
+2. Sync the current ignored `backend/.agent-principals.json` securely from the teammate running the worker.
+   Never paste tokens in chat or commit them. A worker GET returning 401 means stop and resolve its credential.
+   Do not rotate shared tokens or reseed during a teammate's test: rotation revokes their worker; reseeding resets stock.
+3. Run exactly one independent worker, using the current code:
+   ```sh
+   cd agents
+   BRAIN=claude TRANSPORT=inkbox SKIP_BACKLOG=0 npm start
    ```
-2. **Deploy:**
-   - Merge to `main` (Vercel deploys the backend and the web consent page).
-   - The Manufact MCP servers redeploy from `manufact`.
-3. **Mint agent tokens** (`cd backend && npm run agents:tokens`): the worker, the buyer agent and the seeded
-   sellers. Self-serve businesses need nothing here: the runner mints their seller tokens itself.
-4. **Runner settings:** `agents/.env.local` sets:
-   - `TRANSPORT=inkbox`, `BACKEND_URL=https://exchangent.vercel.app`
-   - `MCP_URL=https://warm-pulse-8qbp6.run.mcp-use.com/mcp`, `PRINCIPALS_FILE=../backend/.agent-principals.json`
-   - `SKIP_BACKLOG=1`, `INKBOX_LOCAL_SELLERS=Mission Ergonomics,SoMa Office Supply`
-   - an admin-scoped `INKBOX_API_KEY`
-5. **Smoke test:** `cd agents && npm run inkbox:smoke`. Then `npm start` (`BRAIN=mock` to rehearse,
-   `BRAIN=claude` for the show).
-6. **Payments:**
-   - Stripe sandbox webhook `https://exchangent.vercel.app/webhooks/stripe`, with `STRIPE_WEBHOOK_SECRET` on Vercel.
-   - Emails come from the agents' Inkbox mailboxes: the deal email (buyer agent) and the sale email (seller agent). The
-     Primitive receipt is optional and stays off unless `PRIMITIVE_API_KEY` and `PRIMITIVE_FROM` are set.
+   Configure the backend and agent MCP endpoints from the table, the principals file, and the Inkbox key in
+   `agents/.env.local`. `SKIP_BACKLOG=0` preserves pending work across a restart. With it enabled, old events
+   can be acknowledged without being delivered, even though a request remains "negotiating".
+4. Confirm the actual runner is alive and completes a turn. A reachable API or polling UI is not worker health.
+   Record the host: a local process survives closing a panel, but not sleeping or shutting down that computer.
+   Laptop-off persistence requires an independently hosted worker and a separate successful test.
+5. Check owned inventory and delivery days before selecting prompts. Main bundle needs one compatible desk
+   and one ergonomic chair at each participant. Desk-only needs a compatible desk. Stock can change after each run.
+6. Verify the Stripe sandbox endpoint `https://exchangent.vercel.app/webhooks/stripe` and its matching signing
+   secret on Vercel. A secret from `stripe listen` does not verify the deployed endpoint's events.
+7. Verify Inkbox identities/tunnels without starting a duplicate worker. `npm run inkbox:smoke` must run while
+   the worker is stopped: it uses the same tunnels. Identity-cap fallbacks are in-process, not Inkbox deliveries.
+   Do not delete identities as part of rehearsal. Use recorded transport receipts to describe each actual hop.
+8. Verify buyer/seller email destinations. Deal and sale notifications use Inkbox; Primitive confirmation is
+   optional. "Queued" or "sent" is not proof of inbox arrival. Keep the UI useful if email is delayed.
 
-## Live script (about 4 minutes)
+## Main demo: request → competition → recovery → paid order
 
-1. **Seller signs up.** Person A connects Exchangent, enters their email and the code, picks **Create a
-   business** ("Alex Woodworks", $15 delivery, 1 day) and approves. In chat:
-   > Add a walnut writing desk, 46 inches wide, list $240, my minimum $155, 2 in stock. And a mesh ergonomic
-   > chair, list $210, minimum $130, 3 in stock.
+Allow 4–6 minutes plus variable model and email latency; never promise exact completion time or price.
 
-   Claude calls `upsert_inventory_item` twice. Say: "The floor is private. The buyer's side never sees it."
-2. **Buyer signs up.** Person B connects with a different email, picks **Buyer account**, and asks:
-   > Find me a desk no wider than 48 inches and an ergonomic chair delivered in San Francisco by tomorrow.
-   > Budget $400 all-in, I'd love $300.
-3. **Show the runner terminal.**
-   - The buyer agent opens sessions with Alex Woodworks, Bay Desk Co and Mission.
-   - Each seller agent opens at list price.
-   - The buyer agent counters at $300, and Alex's agent meets it (its floors add up to $300).
-   - The buyer gets `READY TO RESERVE` and a deal email.
-   - Say: "Two people's agents haggled over Inkbox A2A. Each one re-reads the deal from Exchangent before it
-     moves."
-4. **Buyer's inbox:** "Deal reached: Alex Woodworks, $300.00".
-5. **Buyer, in Claude:** "reserve the Alex Woodworks offer and get me a checkout link". Pay with
-   `4242 4242 4242 4242`.
-6. **Buyer:** "is it paid?" The order is confirmed.
-7. **Seller's inbox:** "Sold: …, $300.00" from their own agent. **Seller, in Claude:** "show my inventory".
-   The stock went down by one of each.
+1. **Seller, privately in their connected account:** inspect existing inventory. If creating a fresh business,
+   add a 46-inch walnut desk (list $240, minimum $155, 2 available) and an ergonomic mesh chair (list $210,
+   minimum $130, 3 available), with $15 delivery and a one-day estimate. Set "let my agent negotiate" on.
+   For existing stock, do not blindly set an absolute quantity while buyers may be reserving it. Inventory
+   upsert is a stocktake, not an atomic "add N" operation. Stock it before the buyer starts.
+2. **Buyer, connected as Buyer:**
+   > Find a desk no wider than 48 inches and an ergonomic chair, delivered in San Francisco within three days.
+   > Spend at most $400 including delivery; aim for $300. Let my agent negotiate.
 
-## More scenarios
-
-The buyer is on **claude.ai** with the Exchangent connector, signed in as the buyer email. The seller is in **Claude Code**,
-connected as Alex Woodworks. Use fresh wording each run: an identical order returns the earlier request.
-
-### Scenario 2: desk-only bidding war (four sellers)
-
-Four businesses stock a desk of 48in or less. Their delivered minimums are private, but ranked from lowest:
-Exchangent Seller Test (1 left), Alex Woodworks, Bay Desk Co, Mission Ergonomics. The point is that the cheapest seller
-wins, and Alex's agent never goes below its floor.
-
-1. **Seller (Claude Code):**
-   > Show my inventory. Make sure the walnut desk has at least 2 available.
-2. **Buyer (claude.ai):**
-   > I just need a desk, no chair: 48 inches wide or less, delivered in San Francisco by tomorrow. My budget is $220
-   > all-in and I'd like to pay around $160. Let my agent negotiate.
-3. **Buyer:**
-   > Show me how the agents are negotiating.
-
-   Open "Watch the agents negotiate live ↗" on the big screen. Every seller agent opens at list: $200, $255, $285 and
-   $320. Each one is countered at about $160, and they concede at different speeds.
-4. **Expected result:** the deal email comes from the cheapest seller that reaches the buyer agent's number. Usually
-   that's Exchangent Seller Test (about $160) or Alex Woodworks ($170 is Alex's floor). Bay and Mission stall above $200.
-   - **Say:** "Alex's agent stopped exactly at the owner's private minimum. It can't go lower, because the backend
-     refuses any offer below the floor."
+   Confirm the structured request has both items, `max_width_in:48`, `ergonomic:true`, the correct region,
+   budget and delegation. Resolve the delivery date explicitly in the buyer's timezone. Allow at least
+   three days so a two-day seller can qualify; "tomorrow" is not a reliable three-seller demonstration.
+3. **Open the returned watch link.** Show each seller's opening/current all-in prices, actual recorded moves
+   and offer race. Agents now concede gradually: do not promise an immediate $300 acceptance, a floor-level
+   final offer, a specific winner, or the globally cheapest result before all sellers respond.
+4. **Close only the panel/tab while the worker stays running.** Reopen the same request from Buying.
+   Show "Saved request restored". Claim continuing work only if new saved moves actually appeared while
+   closed; otherwise say the saved state recovered. This does not demonstrate a laptop-off worker.
 5. **Buyer:**
-   > Show my offers, then reserve the best one and get me a checkout link.
+   > Compare the current valid offers, including delivery and how each meets my requirements. Show me the best
+   > available option. Wait for my approval before reserving or opening checkout.
 
-   Pay with `4242 4242 4242 4242`. Then:
-   > Is my order paid?
-6. **Seller (only if Alex won):**
-   > Show my inventory and recent negotiations.
+   Review the exact seller, items, quantity, total, expiry and delivery estimate. Do not describe a delivery
+   estimate as a carrier guarantee. If changed/expired, reload and review again.
+6. **Buyer, after review:** "Reserve that exact offer and get me a test checkout link."
+   Available stock decreases at reservation. It is held stock, not a completed sale.
+   In Stripe's visible **test mode**, use `4242 4242 4242 4242`, a future expiry and test CVC. The human pays.
+7. **Buyer:** "Check whether this order is paid." Only the verified webhook/authoritative server state
+   confirms it. A success URL, a generated link or an agent's message is insufficient. Pending means wait,
+   not pay again. Show the verified order and measured receipt (contacted sellers, offers/counters and
+   same-seller price reduction). Do not claim uninstrumented human approvals or invented savings.
+8. **Seller:** "Show my inventory and orders." Verify the matching order, held/available stock and sold count.
+   Sold increases once after payment. Show the sale email only if it actually arrived. Shipping/delivery
+   remains separate; any demo scan must stay labelled simulated.
 
-### Scenario 3: the owner haggles by hand, and the buyer agent switches to the better deal
+## Backup: desk-only competition
 
-This scenario shows a person in the loop. The seller turns its agent off and negotiates in chat. The buyer's agent
-still haggles for the buyer, and when a cheaper offer arrives late it reopens the deal.
+> Find one desk no wider than 48 inches, delivered in San Francisco within three days. Maximum $220 all-in;
+> aim for $160. Let my agent negotiate.
 
-1. **Seller (Claude Code):**
-   > Turn off agent negotiation for my business.
-2. **Buyer (claude.ai):**
-   > Get me a compact desk under 48 inches and an ergonomic office chair delivered in SF. $400 max, hoping for about
-   > $300. Let my agent negotiate.
+The current seeded catalogs can produce Alex Woodworks, Bay Desk Co, Mission Ergonomics and Exchangent
+Seller Test, subject to ownership, delegation, stock, deadline and matching rules. The test desk has limited
+stock: it is not guaranteed to participate. Check actual matches rather than announcing "four sellers" first.
+A target is a preference, not a promised price. Show businesses that cannot meet the budget honestly.
+Reserve only a still-valid reviewed offer. If Alex does not win, do not claim Alex's inventory decreased.
 
-   The runner log shows `skipped … seller negotiates in chat` for Alex Woodworks. Bay and Mission haggle with the buyer
-   agent, which settles on Bay at about $370. The buyer gets the deal email.
-3. **Seller:**
-   > Show my open buyer requests.
+## Optional advanced demo: a human seller joins late
 
-   Then:
-   > On that request, offer my walnut desk and mesh chair at $310 total including delivery, with the note "Hand-made
-   > walnut, delivered tomorrow."
-4. **Watch:** the buyer agent sees a cheaper late offer and counters Alex at $300.
-5. **Seller:**
-   > Read that negotiation again and accept the buyer's counter.
-6. **Expected result:** the buyer agent switches to Alex Woodworks, and the buyer gets a **"Better deal: Alex
-   Woodworks, $300.00"** email.
-7. **Buyer:**
-   > Show my offers and reserve the Alex Woodworks offer.
+1. Owner turns their business's negotiation agent off **before** the buyer request.
+2. Buyer submits the main prompt and delegates negotiation. Other businesses negotiate automatically.
+3. Owner lists their open requests and inspects that request's current session/version.
+4. Owner submits a genuinely competitive offer for the actual bundle, including delivery, within their own
+   floors. `$310` is an example, not a required outcome. Do not invent delivery promises in the note.
+5. Buyer agent may counter and prefer the new offer if it is eligible and better. Wait for actual recorded
+   evidence; do not promise an exact `$300` counter or switch. A held/paid order must not silently switch sellers.
+6. Owner re-reads before answering. Human buyer reviews, reserves and approves test checkout as above.
+7. Restore the owner's intended delegation setting after rehearsal, and verify it saved.
 
-   Pay with `4242 4242 4242 4242`, and the seller gets the "Sold" email.
-8. **Seller, afterwards:**
-   > Turn agent negotiation back on.
+## Failure and recovery checks
 
-Measured cost with `BRAIN=claude`: about $0.20 per agent turn, so about $3 for a three-seller haggle.
+| Case | Expected evidence / action |
+|---|---|
+| No matching sellers | Explicit no-match outcome; ask the buyer before relaxing requirements. Do not animate fake negotiations. |
+| Same email owns seller | Self-match excluded. Use distinct consenting accounts. |
+| No stock / last unit | Out-of-stock offer cannot reserve; concurrent buyers cannot both hold the last unit. Re-read current offers. |
+| Expired offer or changed version | Exclude expired offers from current ranking; stale mutations fail and re-read, without silent substitution. |
+| Expired/released reservation | Return to current offers and obtain a fresh hold; do not reuse the ended checkout. |
+| Payment pending / webhook delayed | Show verification, suppress duplicate pay, reconcile the existing session. Never fabricate confirmation. |
+| Cancelled or declined card | No paid order; inspect the hold/session and retry only when the server permits it. |
+| Duplicate/delayed payment webhook | Idempotent confirmation; no duplicate order, sold increment or refund. |
+| Panel closed / browser storage missing | Recover by owned request/reservation ID from the backend. Storage is only a convenience. |
+| Worker restart / failed turn | Preserve backlog; retry safely; show stalled/error truthfully. No invented progress while disconnected. |
+| Worker 401 | Sync current credentials securely; restart once resolved. Do not discard events or reset stock. |
+| 401/403/404 in human view | Sign in / respect ownership / show missing-request error respectively; do not treat every 404 as private access. |
+| Identity cap / email delay | Show real transport and saved order state; never claim all traffic or email used Inkbox unless recorded. |
+| Seller pauses agent | No new unauthorized turn; verify server rejects revoked authority. Owner can negotiate in chat. |
+| After-sale problem | Use an actual paid order and current policy. Refund remains pending until verified. No live-money refund. |
 
-## Rehearse locally (no keys, no InsForge, fake Stripe)
+## Rehearsal and public-listing gates
 
-```bash
-# Postgres with every migration (see backend/test/sql/run.sh for the loop), then:
-cd backend
-DATABASE_URL=postgres://... npm run seed:negotiation
-DATABASE_URL=postgres://... COMMERCE_BASE_URL=http://127.0.0.1:8787 npm run agents:tokens
-DATABASE_URL=postgres://... npm run local:server      # opening a checkout URL "pays" via a signed local webhook
-cd ../mcp && EXCHANGENT_AUTH=bearer EXCHANGENT_API_URL=http://127.0.0.1:8787/api/v1 npm run dev
-cd ../agents && TRANSPORT=local BRAIN=mock MCP_URL=http://127.0.0.1:3100/mcp npm start
-BUYER_TOKEN=<a buyer token> node scripts/buyer.ts create   # then reserve <offer_id>, checkout <reservation_id>
-```
+Run unit/type/build and disposable-Postgres checks before the live run. The live acceptance gate is a new
+OAuth-created request, actual model/Inkbox turns, close/reopen with new records, human-approved Stripe test
+payment, signed webhook and owner-visible stock/order. Record failures; do not relabel a mock run as live.
 
-## If something goes wrong
-
-- **`IdentityCapError`:** a fourth identity was requested. Check that only Bay Desk Co and Mission matched, or
-  raise the plan cap.
-- **"order not delegated to the buyer agent":** the order was created with `delegate_negotiation: false`, so
-  the person negotiates it in chat.
-- **`401` from the backend in the runner:** the agent tokens expired (72 hours) or were rotated. Run
-  `npm run agents:tokens` again and restart the runner.
-- **A reservation is stuck in `awaiting_payment`:** a hold that never opened checkout is released on the next
-  reserve, at most about 2 minutes after it was made.
+See `doc/connector-readiness.md` for custom-connector testing versus public-directory publication requirements.
+No public listing, live payment capability or universal host compatibility is implied by this runbook.
